@@ -45,49 +45,41 @@ file:
    to "all files" / "no date limit" instead of prompting. `Get-ChildItem` then computes
    the *exact* matching file set in-process (name pattern via `-like`, date via
    `LastWriteTime.Date`). This computed list drives the preview table, the confirmation
-   prompt, and later the verification pass — it is the source of truth for "what should
-   get copied," independent of what Robocopy itself decides to touch.
-2. **Copy (Robocopy).** The same name pattern(s) are passed to `robocopy.exe` as
-   file-spec arguments, with the date range translated to `/MAXAGE:yyyyMMdd` /
-   `/MINAGE:yyyyMMdd`. Robocopy is used deliberately over `Copy-Item` for its retry/wait
-   logic on flaky network shares, multithreading, and native timestamp preservation —
-   see the inline comment above the `$roboArgs` block for the specific switches and why
-   (in particular `/R:3 /W:5`, overriding Robocopy's default retry count of ~1,000,000
-   which will otherwise hang a script indefinitely on a permission error). `-DryRun`
-   maps to Robocopy's `/L` (list-only) and skips the destination-creation and
-   verification steps entirely.
+   prompt, copy, and verification pass — it is the source of truth for what gets copied.
+   Recursive enumeration is explicit so directory reparse points can be skipped by
+   default rather than accidentally following a junction loop.
+2. **Copy (Robocopy).** Matches are grouped by their actual source directory and passed
+   to `robocopy.exe` as exact file names in command-line-sized batches. This is deliberate:
+   passing the original wildcard/date filters allowed Robocopy to copy files that were
+   never previewed or verified. Robocopy still provides retry/wait logic, multithreading,
+   and native timestamp preservation. `/R`, `/W`, and `/MT` are configurable through
+   `-RetryCount`, `-RetryWait`, and `-Threads`. `-DryRun` and standard `-WhatIf` stop
+   before destination creation or Robocopy execution.
 3. **Verify (PowerShell).** For every file in the PowerShell-computed match list, checks
    the destination has the same name, size, and last-write time (within a 2-second
-   tolerance for filesystem timestamp resolution differences). This is intentionally
-   *not* a hash/binary comparison — the spec calls for fast name+date verification, not
-   correctness-grade integrity checking.
+   tolerance for filesystem timestamp resolution differences). `-VerificationMode Hash`
+   additionally compares SHA-256 hashes; metadata mode remains the faster default.
 
 ### Key design decisions worth knowing before changing this script
 
-- **Dual filtering (PowerShell computes, Robocopy executes).** Robocopy's own
-  `/MAXAGE`/`/MINAGE` are day-granularity and were judged unreliable as the sole source
-  of "what got copied" for reporting purposes. PowerShell's `Get-ChildItem` pass is the
-  authoritative match list; Robocopy is just the transfer engine. If you change the date
-  or name filtering logic, update both the `Get-ChildItem`/`Where-Object` block and the
-  `$roboArgs` construction so they stay in agreement.
-- **`[datetime]` params, not `[Nullable[datetime]]`.** An earlier version used
-  `[Nullable[datetime]]$StartDate` to distinguish "not supplied" from "supplied." That
-  broke: PowerShell silently unwraps `Nullable[datetime]` to a plain `DateTime` on
-  parameter bind, so `.Value` doesn't exist and returns `$null`, and a later `.ToString()`
-  call throws "You cannot call a method on a null-valued expression." Presence is now
-  detected via `$PSBoundParameters.ContainsKey('StartDate'|'EndDate')` instead. Don't
-  reintroduce `Nullable[datetime]` for the same reason.
-- **`ConvertTo-MonthYearDate`'s `[datetime]::TryParseExact` call needs two specific
-  workarounds**, both only reachable via the interactive date prompt (every other test
-  bypasses it with `-Force`/explicit `-StartDate`/`-EndDate`, which is why this shipped
-  once already): (1) the `[ref]$parsed` target must start as `[datetime]::MinValue`, not
-  `$null` — Windows PowerShell 5.1 can't resolve the overload when the ref target is
-  untyped/null and throws "Cannot find an overload for TryParseExact." (2) the format
-  list must be explicitly cast `[string[]]@('MM/yyyy', 'M/yyyy')` — an uncast `@(...)`
-  literal resolves to `Object[]`, which doesn't throw but makes `TryParseExact` silently
-  return `$false` for every input, so valid dates like "04/2026" get rejected with no
-  clue why. The `Tests\CopyFromTo.Tests.ps1` "Interactive prompts" context pipes answers
-  into the real prompt specifically to keep this path under test.
+- **Exact transfer set.** Never replace the per-directory exact-name batching with broad
+  Robocopy wildcard/date arguments without also solving the preview/copy race. The old
+  design could copy a future-dated or newly created file that was absent from the preview,
+  then verification would ignore it. `Split-FileNameBatches` keeps exact-name commands
+  below a conservative Windows command-line-size budget.
+- **Optional date bounds are genuinely optional.** There are no sentinel dates such as
+  1980 or today. A missing start or end is tested independently. Command-line values use
+  invariant explicit formats (`yyyy-MM-dd`, `M/d/yyyy`, or `M/yyyy`); month-only end dates
+  expand to the last day of that month. Presence is still detected through
+  `$PSBoundParameters` rather than `Nullable[datetime]`, which PowerShell unwraps during
+  binding.
+- **`TryParseExact` compatibility.** The `[ref]$parsed` target must begin as a typed
+  `[datetime]::MinValue`, and format arrays must be explicitly cast to `[string[]]` for
+  Windows PowerShell 5.1 overload resolution.
+- **Canonical path safety.** Source, destination, and log paths are resolved to absolute
+  filesystem paths without stripping a drive root (`C:\` must never become `C:`). The
+  script rejects identical paths and destinations nested under the source. Relative-path
+  verification assumes this canonicalization has already occurred.
 - **`$PSNativeCommandUseErrorActionPreference` guard at the top.** On PowerShell 7.3+,
   if that preference variable is `$true`, a native command (Robocopy) returning a
   non-zero exit code becomes a terminating error — but Robocopy's exit codes are a
@@ -103,11 +95,12 @@ file:
   missing/mismatched files, `2` fatal error or Robocopy copy error, `3` user cancelled
   (declined confirmation or declined destination creation). Preserve these if you touch
   the exit paths — they're meant to be automation-friendly.
-- **Logging**: two log files per run under `Logs\` (next to the script by default, or
-  `-LogFolder`), timestamped `CopyFromTo_<runStamp>.log` (script-level narrative, via
+- **Logging**: two collision-resistant log files per run under `Logs\` (next to the
+  script by default, or `-LogFolder`), timestamped with milliseconds and PID:
+  `CopyFromTo_<runStamp>.log` (script-level narrative, via
   `Write-Log`) and `CopyFromTo_<runStamp>_robocopy.log` (Robocopy's own per-file log,
-  via `/LOG:` + `/TEE`). Keep these separate rather than merging — Robocopy's log format
-  doesn't mix cleanly with the script's own log lines.
+  via `/LOG:`/`/LOG+:` + `/TEE`). `-LogRetentionDays` opts into cleanup of old matching
+  logs. Keep script and Robocopy logs separate.
 - **`-FileName` accepts comma-separated patterns, not space-separated array elements.**
   `[string[]]$FileName` looks like it should accept multiple argv tokens
   (`-FileName *.txt *.csv`), but when the script runs as a real external process (the
@@ -118,7 +111,14 @@ file:
   is re-split on commas (`$_ -split ','`), so both a comma-joined single string
   (`-FileName '*.txt,*.csv'`, the realistic CLI form — same convention as the
   interactive prompt) and a true array (the in-process form) normalize to the same
-  result. If you touch this parameter, keep both call shapes working.
+  result. The all-files default is `*`, not `*.*`, so extensionless files are included.
+  Empty normalized lists and path separators in patterns are rejected.
+- **Reparse points.** Recursive traversal skips junctions and symlink directories by
+  default. `-FollowReparsePoint` is an explicit opt-in for callers who understand that
+  linked data can lie outside the apparent source tree.
+- **Output and automation.** Exit codes remain the primary process contract. `-PassThru`
+  adds a structured summary object, while default output stays human-oriented. Standard
+  `-WhatIf` is supported alongside `-DryRun`; explicit `-Confirm` uses `ShouldProcess`.
 - **`-Help` lives in its own parameter set** (`ParameterSetName = 'Help'`), not just a
   bare `[switch]$Help` alongside the others. `Source`/`Destination` are `Mandatory` in
   the default parameter set, and PowerShell prompts for missing mandatory parameters
