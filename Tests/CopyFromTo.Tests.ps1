@@ -40,6 +40,18 @@ BeforeAll {
             Output   = $output
         }
     }
+
+    # For driving the interactive prompts themselves (FileName / date range). Unlike
+    # Invoke-CopyFromTo, this must NOT pass -NonInteractive - that makes Read-Host throw
+    # immediately instead of reading the piped answers.
+    function Invoke-CopyFromToInteractive {
+        param([string[]]$ScriptArgs, [string[]]$Answers)
+        $output = $Answers | & $script:PwshExe -NoProfile -File $script:ScriptPath @ScriptArgs 2>&1 | Out-String
+        [pscustomobject]@{
+            ExitCode = $LASTEXITCODE
+            Output   = $output
+        }
+    }
 }
 
 Describe 'CopyFromTo.ps1' {
@@ -111,6 +123,34 @@ Describe 'CopyFromTo.ps1' {
 
             $result.ExitCode | Should -Be 0
             (Get-ChildItem $DestDir -File).Name | Sort-Object | Should -Be @('Ancient.txt', 'Future.txt')
+        }
+    }
+
+    Context 'Interactive prompts' {
+
+        It 'parses a MM/yyyy date typed at the date-range prompt' {
+            # Regression test: an earlier version threw "Cannot find an overload for
+            # TryParseExact" here under Windows PowerShell 5.1, because the [ref] target
+            # started as untyped $null instead of [datetime]::MinValue, and separately
+            # because an uncast @(...) format-array literal (Object[], not string[])
+            # made TryParseExact silently return $false instead of throwing. Both bugs
+            # only showed up on the interactive path, which every other test bypasses via
+            # -Force / explicit -StartDate -EndDate - hence a dedicated prompt-driving
+            # test rather than relying on coverage from the other contexts.
+            # -Force is deliberately NOT passed - it would skip the very prompts this
+            # test needs to exercise. The destination is pre-created so the "create
+            # destination?" prompt doesn't consume an answer meant for a later prompt.
+            New-TestFile "$SourceDir\Photo1.jpg" -LastWriteTime '2024-05-15'
+            New-Item -ItemType Directory -Path $DestDir -Force | Out-Null
+
+            # Answers, one per Read-Host call: file pattern, start month/year,
+            # end month/year (blank = unbounded), then "y" to confirm the copy.
+            $result = Invoke-CopyFromToInteractive -Answers @('*.jpg', '05/2024', '', 'y') -ScriptArgs @(
+                '-Source', $SourceDir, '-Destination', $DestDir, '-LogFolder', $LogDir
+            )
+
+            $result.ExitCode | Should -Be 0
+            Test-Path -LiteralPath "$DestDir\Photo1.jpg" | Should -BeTrue
         }
     }
 

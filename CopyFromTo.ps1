@@ -148,8 +148,14 @@ function ConvertTo-MonthYearDate {
     for ($attempt = 1; $attempt -le 3; $attempt++) {
         $raw = Read-Host $PromptText
         if ([string]::IsNullOrWhiteSpace($raw)) { return $null }
-        $parsed = $null
-        if ([datetime]::TryParseExact($raw.Trim(), @('MM/yyyy', 'M/yyyy'), [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::None, [ref]$parsed)) {
+        # $parsed must start as a real typed DateTime, not $null - Windows PowerShell 5.1
+        # can't resolve the TryParseExact overload when the [ref] target is untyped/null.
+        # The format list must be explicitly [string[]]-cast - an uncast @(...) literal
+        # resolves to Object[], which silently makes TryParseExact return $false instead
+        # of throwing, so this fails quietly rather than with an obvious error.
+        $parsed = [datetime]::MinValue
+        $formats = [string[]]@('MM/yyyy', 'M/yyyy')
+        if ([datetime]::TryParseExact($raw.Trim(), $formats, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::None, [ref]$parsed)) {
             $firstOfMonth = Get-Date -Year $parsed.Year -Month $parsed.Month -Day 1
             if ($EndOfMonth) { return $firstOfMonth.AddMonths(1).AddDays(-1) }
             return $firstOfMonth

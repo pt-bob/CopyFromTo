@@ -74,6 +74,17 @@ file:
   call throws "You cannot call a method on a null-valued expression." Presence is now
   detected via `$PSBoundParameters.ContainsKey('StartDate'|'EndDate')` instead. Don't
   reintroduce `Nullable[datetime]` for the same reason.
+- **`ConvertTo-MonthYearDate`'s `[datetime]::TryParseExact` call needs two specific
+  workarounds**, both only reachable via the interactive date prompt (every other test
+  bypasses it with `-Force`/explicit `-StartDate`/`-EndDate`, which is why this shipped
+  once already): (1) the `[ref]$parsed` target must start as `[datetime]::MinValue`, not
+  `$null` — Windows PowerShell 5.1 can't resolve the overload when the ref target is
+  untyped/null and throws "Cannot find an overload for TryParseExact." (2) the format
+  list must be explicitly cast `[string[]]@('MM/yyyy', 'M/yyyy')` — an uncast `@(...)`
+  literal resolves to `Object[]`, which doesn't throw but makes `TryParseExact` silently
+  return `$false` for every input, so valid dates like "04/2026" get rejected with no
+  clue why. The `Tests\CopyFromTo.Tests.ps1` "Interactive prompts" context pipes answers
+  into the real prompt specifically to keep this path under test.
 - **`$PSNativeCommandUseErrorActionPreference` guard at the top.** On PowerShell 7.3+,
   if that preference variable is `$true`, a native command (Robocopy) returning a
   non-zero exit code becomes a terminating error — but Robocopy's exit codes are a
