@@ -112,7 +112,12 @@ param(
 )
 
 if ($PSCmdlet.ParameterSetName -eq 'Help') {
-    Get-Help -Detailed $PSCommandPath | Out-Host
+    # Get-Help's default formatter pads each .EXAMPLE block with several trailing
+    # "blank" lines that actually contain indentation whitespace, not true empty lines
+    # (not something controllable from comment-based help source) - collapse any run of
+    # 2+ such lines down to a single blank line before printing.
+    $helpText = (Get-Help -Detailed $PSCommandPath | Out-String) -replace '(?:[ \t]*\r?\n){2,}', "`n`n"
+    Write-Host $helpText.TrimEnd()
     exit 0
 }
 
