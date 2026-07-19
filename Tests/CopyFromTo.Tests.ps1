@@ -305,5 +305,20 @@ Describe 'CopyFromTo.ps1' {
             $help = Get-Help $script:ScriptPath
             $help.Synopsis | Should -Not -BeNullOrEmpty
         }
+
+        It '-Help prints parameter descriptions and exits 0 without prompting for Source/Destination' {
+            # -Help lives in its own parameter set specifically so it works standalone -
+            # Source/Destination are Mandatory in the default set, and PowerShell prompts
+            # for missing mandatory parameters before any script code runs. -NonInteractive
+            # (via Invoke-CopyFromTo) turns any such stray prompt into a fast failure instead
+            # of a hang, so this also guards against a regression that reintroduces one.
+            $result = Invoke-CopyFromTo -ScriptArgs @('-Help')
+
+            $result.ExitCode | Should -Be 0
+            $result.Output | Should -Match 'SYNOPSIS'
+            $result.Output | Should -Match '-Source'
+            $result.Output | Should -Match '-Destination'
+            $result.Output | Should -Match '-FileName'
+        }
     }
 }

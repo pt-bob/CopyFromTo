@@ -25,6 +25,9 @@ There is no module manifest and no build step. A Pester integration suite lives 
 # Fully unattended (e.g. Task Scheduler): skips every prompt, auto-creates the
 # destination, defaults unspecified filters to "all files" / "no date limit"
 .\CopyFromTo.ps1 -Source 'C:\Data' -Destination '\\NAS\Backup\Data' -Force
+
+# List every parameter with a short description, then exit
+.\CopyFromTo.ps1 -Help
 ```
 
 There is no linter configured. See "Testing changes" below for how to run the test
@@ -116,6 +119,16 @@ file:
   (`-FileName '*.txt,*.csv'`, the realistic CLI form — same convention as the
   interactive prompt) and a true array (the in-process form) normalize to the same
   result. If you touch this parameter, keep both call shapes working.
+- **`-Help` lives in its own parameter set** (`ParameterSetName = 'Help'`), not just a
+  bare `[switch]$Help` alongside the others. `Source`/`Destination` are `Mandatory` in
+  the default parameter set, and PowerShell prompts for missing mandatory parameters
+  *before* any script code runs — a plain switch would still leave `.\CopyFromTo.ps1
+  -Help` blocked on a "Supply values for the following parameters: Source:" prompt.
+  With a separate parameter set, PowerShell resolves to `'Help'` (which requires
+  nothing else) and the script prints `Get-Help -Detailed $PSCommandPath` and exits 0
+  before reaching any of that logic. If you add new parameters, put them in the
+  `'Default'` set explicitly — an unscoped parameter is valid in every set and would
+  silently become selectable alongside `-Help` too.
 
 ## Testing changes
 

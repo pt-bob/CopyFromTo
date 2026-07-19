@@ -50,6 +50,14 @@
 .PARAMETER LogFolder
     Folder to write log files to. Defaults to a "Logs" folder next to this script.
 
+.PARAMETER Help
+    Displays a description of every command-line parameter and exits without
+    copying anything. Can be used on its own, with no other parameters.
+
+.EXAMPLE
+    .\CopyFromTo.ps1 -Help
+    Displays all command-line parameters with a short explanation of each.
+
 .EXAMPLE
     .\CopyFromTo.ps1 -Source 'C:\Data\Reports' -Destination '\\NAS\Archive\Reports'
     Prompts for file name pattern(s) and a date range, previews the matches, asks
@@ -66,31 +74,47 @@
 #>
 
 #Requires -Version 5.1
-[CmdletBinding()]
+[CmdletBinding(DefaultParameterSetName = 'Default')]
 param(
-    [Parameter(Mandatory = $true, Position = 0)]
+    [Parameter(ParameterSetName = 'Default', Mandatory = $true, Position = 0)]
     [string]$Source,
 
-    [Parameter(Mandatory = $true, Position = 1)]
+    [Parameter(ParameterSetName = 'Default', Mandatory = $true, Position = 1)]
     [string]$Destination,
 
-    [Parameter()]
+    [Parameter(ParameterSetName = 'Default')]
     [string[]]$FileName,
 
-    [Parameter()]
+    [Parameter(ParameterSetName = 'Default')]
     [datetime]$StartDate,
 
-    [Parameter()]
+    [Parameter(ParameterSetName = 'Default')]
     [datetime]$EndDate,
 
+    [Parameter(ParameterSetName = 'Default')]
     [switch]$Recurse,
 
+    [Parameter(ParameterSetName = 'Default')]
     [switch]$DryRun,
 
+    [Parameter(ParameterSetName = 'Default')]
     [switch]$Force,
 
-    [string]$LogFolder
+    [Parameter(ParameterSetName = 'Default')]
+    [string]$LogFolder,
+
+    # Its own parameter set (rather than just [switch]$Help in the Default set) so that
+    # `-Help` alone works standalone - Source/Destination are Mandatory in 'Default', and
+    # PowerShell prompts for missing mandatory parameters *before* any script code runs,
+    # which would block a bare "-Help" invocation on a "Supply values for..." prompt.
+    [Parameter(ParameterSetName = 'Help', Mandatory = $true)]
+    [switch]$Help
 )
+
+if ($PSCmdlet.ParameterSetName -eq 'Help') {
+    Get-Help -Detailed $PSCommandPath | Out-Host
+    exit 0
+}
 
 # Avoid PS 7.3+ turning Robocopy's non-zero (but non-error) exit codes into terminating errors.
 if (Test-Path Variable:\PSNativeCommandUseErrorActionPreference) {
