@@ -1,0 +1,5 @@
+# Runtime logs written by CopyFromTo.ps1
+Logs/
+
+# Local, user-specific Claude Code permissions
+.claude/settings.local.json
