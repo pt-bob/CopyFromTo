@@ -118,6 +118,7 @@ if ($PSCmdlet.ParameterSetName -eq 'Help') {
     # 2+ such lines down to a single blank line before printing.
     $helpText = (Get-Help -Detailed $PSCommandPath | Out-String) -replace '(?:[ \t]*\r?\n){2,}', "`n`n"
     Write-Host $helpText.TrimEnd()
+    Write-Host ''
     exit 0
 }
 
