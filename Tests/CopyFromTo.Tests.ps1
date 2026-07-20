@@ -16,7 +16,6 @@
 
 BeforeAll {
     $script:ScriptPath = (Resolve-Path (Join-Path $PSScriptRoot '..\CopyFromTo.ps1')).Path
-    $script:CompatibilityLauncherPath = (Resolve-Path (Join-Path $PSScriptRoot '..\CopyFromTo-CLAUDE.ps1')).Path
     $script:PwshExe = (Get-Process -Id $PID).Path
     $script:SuiteRoot = Join-Path ([System.IO.Path]::GetTempPath()) "CopyFromToTests_$([guid]::NewGuid())"
     New-Item -ItemType Directory -Path $script:SuiteRoot -Force | Out-Null
@@ -138,8 +137,8 @@ Describe 'CopyFromTo.ps1' {
 
             $result.ExitCode | Should -Be 0
             (Get-ChildItem $DestDir -File).Name | Sort-Object | Should -Be @('Ancient.txt', 'Future.txt')
-            $result.Output | Should -Match 'Matched:\s+2'
-            $result.Output | Should -Match 'Verified:\s+2'
+            $result.Output | Should -Match 'Matched\s*:\s+2'
+            $result.Output | Should -Match 'Verified\s*:\s+2'
         }
 
         It 'honors one-sided date bounds without adding hidden limits' {
@@ -216,19 +215,6 @@ Describe 'CopyFromTo.ps1' {
             $result.Output | Should -Not -Match 'cmdlet .* at command pipeline position'
             Test-Path -LiteralPath "$DestDir\File1.txt" | Should -BeTrue
             $result.Output | Should -Match 'finished with exit status 0\.\r?\n(?:\r?\n)+$'
-        }
-
-        It 'supports the historical CopyFromTo-CLAUDE.ps1 launch name without banner noise' {
-            New-TestFile "$SourceDir\File1.txt" -LastWriteTime '2024-05-01'
-
-            $result = Invoke-CopyFromToInteractive -ExecutableScript $script:CompatibilityLauncherPath `
-                -Answers @($SourceDir, $DestDir) -ScriptArgs @(
-                    '-FileName', '*.txt', '-Force', '-LogFolder', $LogDir
-                )
-
-            $result.ExitCode | Should -Be 0
-            $result.Output | Should -Not -Match 'cmdlet .* at command pipeline position'
-            Test-Path -LiteralPath "$DestDir\File1.txt" | Should -BeTrue
         }
 
         It 'parses a MM/yyyy date typed at the date-range prompt' {

@@ -608,7 +608,8 @@ try {
     }
 
     if (-not $Force -and -not $PSBoundParameters.ContainsKey('Confirm')) {
-        $answer = Read-Host "Proceed with copying $($matchedFiles.Count) file(s) from '$Source' to '$Destination'? (Y/N)"
+        Write-Host "Proceed with copying $($matchedFiles.Count) file(s) from '$Source' to '$Destination'? (Y/N): " -ForegroundColor Green -NoNewline
+        $answer = Read-Host
         if ($answer -notmatch '^[Yy]') {
             Write-Log 'Operation cancelled by user.' 'WARN'
             $exitStatus = 3
@@ -623,8 +624,22 @@ try {
     }
 
     if (-not (Test-Path -LiteralPath $Destination -PathType Container)) {
-        New-Item -ItemType Directory -Path $Destination -Force -ErrorAction Stop | Out-Null
-        Write-Log "Destination folder '$Destination' was created." 'INFO'
+        if ($Force) {
+            New-Item -ItemType Directory -Path $Destination -Force -ErrorAction Stop | Out-Null
+            Write-Log "Destination folder '$Destination' did not exist and was created (-Force)." 'WARN'
+        }
+        else {
+            $createAnswer = Read-Host "Destination folder '$Destination' does not exist. Create it? (Y/N)"
+            if ($createAnswer -match '^[Yy]') {
+                New-Item -ItemType Directory -Path $Destination -Force -ErrorAction Stop | Out-Null
+                Write-Log "Destination folder '$Destination' created." 'INFO'
+            }
+            else {
+                Write-Log 'Operation cancelled: destination folder does not exist.' 'WARN'
+                $exitStatus = 3
+                exit 3
+            }
+        }
     }
 
     $null = Test-DestinationFreeSpace -Path $Destination -RequiredBytes ([long]$totalBytes)
@@ -652,7 +667,6 @@ try {
                 "/W:$RetryWait"
                 "/MT:$Threads"
                 '/COPY:DAT'
-                '/DCOPY:T'
                 '/XJ'
                 '/NP'
                 '/TEE'
@@ -715,22 +729,27 @@ try {
     }
     else {
         Write-Log "Verification found issues: $verified verified, $($sourceMissing.Count) missing at source, $($missing.Count) missing at destination, $($mismatched.Count) mismatched." 'ERROR'
-        if ($sourceMissing.Count -gt 0) { $exitStatus = 2 }
         if ($exitStatus -eq 0) { $exitStatus = 1 }
     }
 
     $elapsed = (Get-Date) - $script:StartTime
+    $summaryFields = [ordered]@{
+        'Matched'       = $matchedFiles.Count
+        'Verified'      = $verified
+        'Source gone'   = $sourceMissing.Count
+        'Missing'       = $missing.Count
+        'Mismatched'    = $mismatched.Count
+        'Robocopy runs' = $robocopyInvocationCount
+        'Elapsed'       = $elapsed.ToString('hh\:mm\:ss')
+        'Script log'    = $script:LogFile
+        'Robocopy log'  = $script:RobocopyLogFile
+    }
+    $labelWidth = ($summaryFields.Keys | Measure-Object -Property Length -Maximum).Maximum
     Write-Host ''
     Write-Host '=== Summary ===' -ForegroundColor Cyan
-    Write-Host "Matched:    $($matchedFiles.Count)"
-    Write-Host "Verified:   $verified"
-    Write-Host "Source gone: $($sourceMissing.Count)"
-    Write-Host "Missing:    $($missing.Count)"
-    Write-Host "Mismatched: $($mismatched.Count)"
-    Write-Host "Robocopy runs: $robocopyInvocationCount"
-    Write-Host "Elapsed:    $($elapsed.ToString('hh\:mm\:ss'))"
-    Write-Host "Script log:   $script:LogFile"
-    Write-Host "Robocopy log: $script:RobocopyLogFile"
+    foreach ($label in $summaryFields.Keys) {
+        Write-Host "$($label.PadRight($labelWidth)) : $($summaryFields[$label])"
+    }
 
     $summary = [pscustomobject]@{
         Matched         = $matchedFiles.Count

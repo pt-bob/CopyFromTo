@@ -7,9 +7,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 A self-contained Windows PowerShell script, `CopyFromTo.ps1`, that copies files
 matching a name pattern and a last-modified date range from one folder to another
 (source/destination can be local or a UNC network share), then verifies the copy.
-`CopyFromTo-CLAUDE.ps1` is a thin compatibility launcher for the historical filename;
-it forwards arguments and exit status to `CopyFromTo.ps1`. There is no module manifest
-or build step. A Pester integration suite lives in `Tests\CopyFromTo.Tests.ps1`.
+There is no module manifest or build step. A Pester integration suite lives in
+`Tests\CopyFromTo.Tests.ps1`.
 
 ## Running it
 
@@ -126,8 +125,7 @@ file:
   The script prompts for missing paths itself, producing the same interaction without
   the banner. `-Help` remains isolated in its own parameter set and exits before prompts.
 - **Final console spacing.** The main `finally` block writes a blank line after the final
-  status log so the next shell prompt is visually separated. The compatibility launcher
-  must not print anything after the maintained script returns.
+  status log so the next shell prompt is visually separated.
 
 ## Testing changes
 
