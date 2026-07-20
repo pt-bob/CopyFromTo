@@ -4,11 +4,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A single self-contained Windows PowerShell script, `CopyFromTo.ps1`, that copies files
+A self-contained Windows PowerShell script, `CopyFromTo.ps1`, that copies files
 matching a name pattern and a last-modified date range from one folder to another
 (source/destination can be local or a UNC network share), then verifies the copy.
-There is no module manifest and no build step. A Pester integration suite lives in
-`Tests\CopyFromTo.Tests.ps1`.
+`CopyFromTo-CLAUDE.ps1` is a thin compatibility launcher for the historical filename;
+it forwards arguments and exit status to `CopyFromTo.ps1`. There is no module manifest
+or build step. A Pester integration suite lives in `Tests\CopyFromTo.Tests.ps1`.
 
 ## Running it
 
@@ -119,16 +120,14 @@ file:
 - **Output and automation.** Exit codes remain the primary process contract. `-PassThru`
   adds a structured summary object, while default output stays human-oriented. Standard
   `-WhatIf` is supported alongside `-DryRun`; explicit `-Confirm` uses `ShouldProcess`.
-- **`-Help` lives in its own parameter set** (`ParameterSetName = 'Help'`), not just a
-  bare `[switch]$Help` alongside the others. `Source`/`Destination` are `Mandatory` in
-  the default parameter set, and PowerShell prompts for missing mandatory parameters
-  *before* any script code runs — a plain switch would still leave `.\CopyFromTo.ps1
-  -Help` blocked on a "Supply values for the following parameters: Source:" prompt.
-  With a separate parameter set, PowerShell resolves to `'Help'` (which requires
-  nothing else) and the script prints `Get-Help -Detailed $PSCommandPath` and exits 0
-  before reaching any of that logic. If you add new parameters, put them in the
-  `'Default'` set explicitly — an unscoped parameter is valid in every set and would
-  silently become selectable alongside `-Help` too.
+- **Interactive path prompts are manual.** `Source` and `Destination` intentionally are
+  not marked `Mandatory`: PowerShell's automatic mandatory-parameter prompt prints a
+  noisy `cmdlet ... at command pipeline position 1` banner before script code can run.
+  The script prompts for missing paths itself, producing the same interaction without
+  the banner. `-Help` remains isolated in its own parameter set and exits before prompts.
+- **Final console spacing.** The main `finally` block writes a blank line after the final
+  status log so the next shell prompt is visually separated. The compatibility launcher
+  must not print anything after the maintained script returns.
 
 ## Testing changes
 

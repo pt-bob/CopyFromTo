@@ -16,6 +16,7 @@
 
 BeforeAll {
     $script:ScriptPath = (Resolve-Path (Join-Path $PSScriptRoot '..\CopyFromTo.ps1')).Path
+    $script:CompatibilityLauncherPath = (Resolve-Path (Join-Path $PSScriptRoot '..\CopyFromTo-CLAUDE.ps1')).Path
     $script:PwshExe = (Get-Process -Id $PID).Path
     $script:SuiteRoot = Join-Path ([System.IO.Path]::GetTempPath()) "CopyFromToTests_$([guid]::NewGuid())"
     New-Item -ItemType Directory -Path $script:SuiteRoot -Force | Out-Null
@@ -55,8 +56,12 @@ BeforeAll {
     # Invoke-CopyFromTo, this must NOT pass -NonInteractive - that makes Read-Host throw
     # immediately instead of reading the piped answers.
     function Invoke-CopyFromToInteractive {
-        param([string[]]$ScriptArgs, [string[]]$Answers)
-        $output = $Answers | & $script:PwshExe -NoProfile -File $script:ScriptPath @ScriptArgs 2>&1 | Out-String
+        param(
+            [string[]]$ScriptArgs,
+            [string[]]$Answers,
+            [string]$ExecutableScript = $script:ScriptPath
+        )
+        $output = $Answers | & $script:PwshExe -NoProfile -File $ExecutableScript @ScriptArgs 2>&1 | Out-String
         [pscustomobject]@{
             ExitCode = $LASTEXITCODE
             Output   = $output
@@ -199,6 +204,32 @@ Describe 'CopyFromTo.ps1' {
     }
 
     Context 'Interactive prompts' {
+
+        It 'prompts for missing paths without PowerShell mandatory-parameter banner noise' {
+            New-TestFile "$SourceDir\File1.txt" -LastWriteTime '2024-05-01'
+
+            $result = Invoke-CopyFromToInteractive -Answers @($SourceDir, $DestDir) -ScriptArgs @(
+                '-FileName', '*.txt', '-Force', '-LogFolder', $LogDir
+            )
+
+            $result.ExitCode | Should -Be 0
+            $result.Output | Should -Not -Match 'cmdlet .* at command pipeline position'
+            Test-Path -LiteralPath "$DestDir\File1.txt" | Should -BeTrue
+            $result.Output | Should -Match 'finished with exit status 0\.\r?\n(?:\r?\n)+$'
+        }
+
+        It 'supports the historical CopyFromTo-CLAUDE.ps1 launch name without banner noise' {
+            New-TestFile "$SourceDir\File1.txt" -LastWriteTime '2024-05-01'
+
+            $result = Invoke-CopyFromToInteractive -ExecutableScript $script:CompatibilityLauncherPath `
+                -Answers @($SourceDir, $DestDir) -ScriptArgs @(
+                    '-FileName', '*.txt', '-Force', '-LogFolder', $LogDir
+                )
+
+            $result.ExitCode | Should -Be 0
+            $result.Output | Should -Not -Match 'cmdlet .* at command pipeline position'
+            Test-Path -LiteralPath "$DestDir\File1.txt" | Should -BeTrue
+        }
 
         It 'parses a MM/yyyy date typed at the date-range prompt' {
             # Regression test: an earlier version threw "Cannot find an overload for
@@ -540,11 +571,8 @@ Describe 'CopyFromTo.ps1' {
         }
 
         It '-Help prints parameter descriptions and exits 0 without prompting for Source/Destination' {
-            # -Help lives in its own parameter set specifically so it works standalone -
-            # Source/Destination are Mandatory in the default set, and PowerShell prompts
-            # for missing mandatory parameters before any script code runs. -NonInteractive
-            # (via Invoke-CopyFromTo) turns any such stray prompt into a fast failure instead
-            # of a hang, so this also guards against a regression that reintroduces one.
+            # -Help lives in its own parameter set so help stays isolated from operational
+            # parameters and cannot trigger interactive path prompts.
             $result = Invoke-CopyFromTo -ScriptArgs @('-Help')
 
             $result.ExitCode | Should -Be 0

@@ -115,10 +115,10 @@
 #Requires -Version 5.1
 [CmdletBinding(DefaultParameterSetName = 'Default', SupportsShouldProcess = $true, ConfirmImpact = 'Medium')]
 param(
-    [Parameter(ParameterSetName = 'Default', Mandatory = $true, Position = 0)]
+    [Parameter(ParameterSetName = 'Default', Position = 0)]
     [string]$Source,
 
-    [Parameter(ParameterSetName = 'Default', Mandatory = $true, Position = 1)]
+    [Parameter(ParameterSetName = 'Default', Position = 1)]
     [string]$Destination,
 
     [Parameter(ParameterSetName = 'Default')]
@@ -176,10 +176,8 @@ param(
     [Parameter(ParameterSetName = 'Default')]
     [switch]$PassThru,
 
-    # Its own parameter set (rather than just [switch]$Help in the Default set) so that
-    # `-Help` alone works standalone - Source/Destination are Mandatory in 'Default', and
-    # PowerShell prompts for missing mandatory parameters *before* any script code runs,
-    # which would block a bare "-Help" invocation on a "Supply values for..." prompt.
+    # Keep help isolated from operational parameters so `-Help` is always a standalone,
+    # side-effect-free invocation.
     [Parameter(ParameterSetName = 'Help', Mandatory = $true)]
     [switch]$Help
 )
@@ -193,6 +191,18 @@ if ($PSCmdlet.ParameterSetName -eq 'Help') {
     Write-Host $helpText.TrimEnd()
     Write-Host ''
     exit 0
+}
+
+# PowerShell's built-in mandatory-parameter prompting prints an unavoidable
+# "cmdlet <name> at command pipeline position 1" banner before asking for values.
+# Prompt manually instead so interactive startup stays clean while parameters remain
+# fully usable for unattended and positional invocations.
+if ([string]::IsNullOrWhiteSpace($Source)) {
+    Write-Host ''
+    $Source = Read-Host 'Source folder'
+}
+if ([string]::IsNullOrWhiteSpace($Destination)) {
+    $Destination = Read-Host 'Destination folder'
 }
 
 # Avoid PS 7.3+ turning Robocopy's non-zero (but non-error) exit codes into terminating errors.
@@ -743,6 +753,7 @@ catch {
 }
 finally {
     Write-Log "CopyFromTo finished with exit status $exitStatus."
+    Write-Host ''
 }
 
 exit $exitStatus
