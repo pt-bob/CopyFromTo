@@ -207,8 +207,9 @@ Describe 'CopyFromTo.ps1' {
         It 'prompts for missing paths without PowerShell mandatory-parameter banner noise' {
             New-TestFile "$SourceDir\File1.txt" -LastWriteTime '2024-05-01'
 
-            $result = Invoke-CopyFromToInteractive -Answers @($SourceDir, $DestDir) -ScriptArgs @(
-                '-FileName', '*.txt', '-Force', '-LogFolder', $LogDir
+            $result = Invoke-CopyFromToInteractive -Answers @($SourceDir, $DestDir, 'Y', 'Y') -ScriptArgs @(
+                '-FileName', '*.txt', '-StartDate', '2024-01-01', '-EndDate', '2024-12-31',
+                '-LogFolder', $LogDir
             )
 
             $result.ExitCode | Should -Be 0
@@ -303,6 +304,14 @@ Describe 'CopyFromTo.ps1' {
     }
 
     Context 'Error handling' {
+
+        It 'fails cleanly instead of prompting when -Force is missing required paths' {
+            $result = Invoke-CopyFromTo -ScriptArgs @('-Force')
+
+            $result.ExitCode | Should -Be 2
+            $result.Output | Should -Match 'Source must be supplied when -Force is used'
+            $result.Output | Should -Not -Match 'Read-Host'
+        }
 
         It 'exits 2 when the source folder does not exist' {
             $missingSource = Join-Path $script:CaseRoot 'DoesNotExist'
@@ -406,6 +415,41 @@ Describe 'CopyFromTo.ps1' {
             $result.ExitCode | Should -Be 2
             $result.Output | Should -Match 'cannot be inside source'
         }
+
+        It 'rejects a destination junction that resolves to the source' {
+            $destinationAlias = Join-Path $script:CaseRoot 'DestinationAlias'
+            New-Item -ItemType Junction -Path $destinationAlias -Target $SourceDir | Out-Null
+            try {
+                $result = Invoke-CopyFromTo -ScriptArgs @(
+                    '-Source', $SourceDir, '-Destination', $destinationAlias,
+                    '-FileName', '*', '-Force', '-DryRun', '-LogFolder', $LogDir
+                )
+            }
+            finally {
+                Remove-Item -LiteralPath $destinationAlias -Force -ErrorAction SilentlyContinue
+            }
+
+            $result.ExitCode | Should -Be 2
+            $result.Output | Should -Match 'must be different'
+        }
+
+        It 'rejects a new destination beneath a junction that resolves into the source' {
+            $destinationAlias = Join-Path $script:CaseRoot 'DestinationAlias'
+            New-Item -ItemType Junction -Path $destinationAlias -Target $SourceDir | Out-Null
+            try {
+                $nestedThroughAlias = Join-Path $destinationAlias 'Backup'
+                $result = Invoke-CopyFromTo -ScriptArgs @(
+                    '-Source', $SourceDir, '-Destination', $nestedThroughAlias,
+                    '-FileName', '*', '-Recurse', '-Force', '-DryRun', '-LogFolder', $LogDir
+                )
+            }
+            finally {
+                Remove-Item -LiteralPath $destinationAlias -Force -ErrorAction SilentlyContinue
+            }
+
+            $result.ExitCode | Should -Be 2
+            $result.Output | Should -Match 'cannot be inside source'
+        }
     }
 
     Context 'Recurse' {
@@ -455,9 +499,44 @@ Describe 'CopyFromTo.ps1' {
             Test-Path -LiteralPath "$DestDir\Linked\Linked.txt" | Should -BeFalse
             $result.Output | Should -Match 'Skipping reparse-point directory'
         }
+
+        It 'detects reparse-point cycles when following links' {
+            New-TestFile "$SourceDir\Top.txt" -LastWriteTime '2024-05-01'
+            $loopJunction = Join-Path $SourceDir 'Loop'
+            New-Item -ItemType Junction -Path $loopJunction -Target $SourceDir | Out-Null
+            try {
+                $result = Invoke-CopyFromTo -ScriptArgs @(
+                    '-Source', $SourceDir, '-Destination', $DestDir,
+                    '-FileName', '*.txt', '-Recurse', '-FollowReparsePoint',
+                    '-Force', '-LogFolder', $LogDir
+                )
+            }
+            finally {
+                Remove-Item -LiteralPath $loopJunction -Force -ErrorAction SilentlyContinue
+            }
+
+            $result.ExitCode | Should -Be 0
+            Test-Path -LiteralPath "$DestDir\Top.txt" | Should -BeTrue
+            $result.Output | Should -Match 'already-visited directory target'
+        }
     }
 
     Context 'Logging' {
+
+        It 'excludes the active logs when the log folder is under a recursive source' {
+            New-TestFile "$SourceDir\File1.txt" -LastWriteTime '2024-05-01'
+            $sourceLogDir = Join-Path $SourceDir 'Logs'
+
+            $result = Invoke-CopyFromTo -ScriptArgs @(
+                '-Source', $SourceDir, '-Destination', $DestDir,
+                '-FileName', '*', '-Recurse', '-Force', '-LogFolder', $sourceLogDir
+            )
+
+            $result.ExitCode | Should -Be 0
+            Test-Path -LiteralPath "$DestDir\File1.txt" | Should -BeTrue
+            Test-Path -LiteralPath "$DestDir\Logs" | Should -BeFalse
+            $result.Output | Should -Match 'Excluded 1 active run log file'
+        }
 
         It 'writes a script log and a robocopy log for each run' {
             New-TestFile "$SourceDir\File1.txt" -LastWriteTime '2024-05-01'

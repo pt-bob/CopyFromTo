@@ -76,31 +76,37 @@ file:
 - **`TryParseExact` compatibility.** The `[ref]$parsed` target must begin as a typed
   `[datetime]::MinValue`, and format arrays must be explicitly cast to `[string[]]` for
   Windows PowerShell 5.1 overload resolution.
-- **Canonical path safety.** Source, destination, and log paths are resolved to absolute
-  filesystem paths without stripping a drive root (`C:\` must never become `C:`). The
-  script rejects identical paths and destinations nested under the source. Relative-path
-  verification assumes this canonicalization has already occurred.
+- **Canonical path safety.** Source, destination, and log paths are resolved to physical
+  filesystem paths (including junction/symlink targets) without stripping a drive root
+  (`C:\` must never become `C:`). For paths that do not exist yet, the nearest existing
+  ancestor is resolved before the remaining segments are appended. The script rejects
+  identical paths and destinations nested under the source even when aliases are used.
+  Relative-path verification assumes this canonicalization has already occurred.
 - **`$PSNativeCommandUseErrorActionPreference` guard at the top.** On PowerShell 7.3+,
   if that preference variable is `$true`, a native command (Robocopy) returning a
   non-zero exit code becomes a terminating error — but Robocopy's exit codes are a
   bitmask where 1–7 mean *success* (see `Get-RobocopyResultDescription`). The script
   force-disables that preference (guarded by a `Test-Path Variable:` check for PS 5.1
   compatibility) so exit-code handling stays consistent across PowerShell versions.
-- **`-Force` has two roles**: skip the confirmation prompt *and* skip the interactive
-  filter prompts (defaulting missing filters to "all/unbounded") *and* auto-create a
-  missing destination folder. It was deliberately not split into separate switches to
-  keep the parameter surface small — this is what makes the script usable unattended
-  (e.g. Task Scheduler).
+- **`-Force` has two roles**: skip the confirmation and interactive filter prompts
+  (defaulting missing filters to "all/unbounded") and auto-create a missing destination
+  folder. Source and destination must still be supplied; omitting either under `-Force`
+  produces a controlled fatal error instead of invoking `Read-Host`. It was deliberately
+  not split into separate switches to keep the parameter surface small.
 - **Script exit codes**: `0` success/nothing-to-do, `1` verification found
-  missing/mismatched files, `2` fatal error or Robocopy copy error, `3` user cancelled
-  (declined confirmation or declined destination creation). Preserve these if you touch
-  the exit paths — they're meant to be automation-friendly.
+  missing/mismatched files, `2` runtime fatal error or Robocopy copy error, `3` user
+  cancelled (declined confirmation or declined destination creation). PowerShell errors
+  that occur before script code starts, such as parameter type/`ValidateRange` binding
+  failures, use PowerShell's own exit code (normally `1`) and cannot be normalized inside
+  the script. Preserve these semantics if you touch the exit paths.
 - **Logging**: two collision-resistant log files per run under `Logs\` (next to the
   script by default, or `-LogFolder`), timestamped with milliseconds and PID:
   `CopyFromTo_<runStamp>.log` (script-level narrative, via
   `Write-Log`) and `CopyFromTo_<runStamp>_robocopy.log` (Robocopy's own per-file log,
   via `/LOG:`/`/LOG+:` + `/TEE`). `-LogRetentionDays` opts into cleanup of old matching
-  logs. Keep script and Robocopy logs separate.
+  logs. Keep script and Robocopy logs separate. The two active run-log paths are excluded
+  from source enumeration so a `LogFolder` beneath a recursive source cannot copy and
+  subsequently fail verification against its own changing log.
 - **`-FileName` accepts comma-separated patterns, not space-separated array elements.**
   `[string[]]$FileName` looks like it should accept multiple argv tokens
   (`-FileName *.txt *.csv`), but when the script runs as a real external process (the
@@ -115,7 +121,8 @@ file:
   Empty normalized lists and path separators in patterns are rejected.
 - **Reparse points.** Recursive traversal skips junctions and symlink directories by
   default. `-FollowReparsePoint` is an explicit opt-in for callers who understand that
-  linked data can lie outside the apparent source tree.
+  linked data can lie outside the apparent source tree. Followed directories are tracked
+  by physical target so junction cycles and duplicate aliases are skipped.
 - **Output and automation.** Exit codes remain the primary process contract. `-PassThru`
   adds a structured summary object, while default output stays human-oriented. Standard
   `-WhatIf` is supported alongside `-DryRun`; explicit `-Confirm` uses `ShouldProcess`.

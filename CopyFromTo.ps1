@@ -11,9 +11,10 @@
     is available with -VerificationMode Hash.
 
     If -FileName and/or -StartDate/-EndDate are not supplied, the script prompts for
-    them interactively. Use -Force for unattended runs: prompts are skipped, missing
-    filters default to "all files" / "no date limit", the destination folder is
-    created automatically if missing, and the confirmation prompt is skipped.
+    them interactively. Use -Force for unattended runs: filter and confirmation prompts
+    are skipped, missing filters default to "all files" / "no date limit", and the
+    destination folder is created automatically if missing. Source and Destination must
+    still be supplied when -Force is used.
 
     The previewed file list is the exact transfer list. Robocopy is invoked once per
     source directory (and in command-line-sized batches) with exact file names, so it
@@ -48,9 +49,9 @@
     Show what would be copied without copying or creating the destination folder.
 
 .PARAMETER Force
-    Skip all interactive prompts (unspecified filters default to "all files" /
-    "no date limit"), skip the confirmation prompt, and auto-create the
-    destination folder if missing.
+    Skip filter and confirmation prompts (unspecified filters default to "all files" /
+    "no date limit") and auto-create the destination folder if missing. Source and
+    Destination remain required for unattended use.
 
 .PARAMETER LogFolder
     Folder to write log files to. Defaults to a "Logs" folder next to this script.
@@ -110,6 +111,12 @@
 .EXAMPLE
     .\CopyFromTo.ps1 -Source 'C:\Data' -Destination '\\NAS\Backup\Data' -Force
     Unattended run: copies all files, no date filter, no prompts.
+
+.NOTES
+    Exit codes: 0 success, 1 verification issues, 2 runtime/fatal error, and 3 user
+    cancellation. Errors raised by PowerShell itself before the script starts (for
+    example parameter type or ValidateRange binding errors) use PowerShell's exit code,
+    which is normally 1 and cannot be normalized by script code.
 #>
 
 #Requires -Version 5.1
@@ -193,18 +200,6 @@ if ($PSCmdlet.ParameterSetName -eq 'Help') {
     exit 0
 }
 
-# PowerShell's built-in mandatory-parameter prompting prints an unavoidable
-# "cmdlet <name> at command pipeline position 1" banner before asking for values.
-# Prompt manually instead so interactive startup stays clean while parameters remain
-# fully usable for unattended and positional invocations.
-if ([string]::IsNullOrWhiteSpace($Source)) {
-    Write-Host ''
-    $Source = Read-Host 'Source folder'
-}
-if ([string]::IsNullOrWhiteSpace($Destination)) {
-    $Destination = Read-Host 'Destination folder'
-}
-
 # Avoid PS 7.3+ turning Robocopy's non-zero (but non-error) exit codes into terminating errors.
 if (Test-Path Variable:\PSNativeCommandUseErrorActionPreference) {
     $PSNativeCommandUseErrorActionPreference = $false
@@ -274,6 +269,123 @@ function Resolve-FullFileSystemPath {
         $fullPath = $fullPath.TrimEnd([char[]]@('\', '/'))
     }
     return $fullPath
+}
+
+function Initialize-NativePathApi {
+    if ('CopyFromTo.NativePathMethods' -as [type]) { return }
+
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+using Microsoft.Win32.SafeHandles;
+
+namespace CopyFromTo
+{
+    public static class NativePathMethods
+    {
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        public static extern SafeFileHandle CreateFile(
+            string fileName,
+            uint desiredAccess,
+            uint shareMode,
+            IntPtr securityAttributes,
+            uint creationDisposition,
+            uint flagsAndAttributes,
+            IntPtr templateFile);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        public static extern uint GetFinalPathNameByHandle(
+            SafeFileHandle file,
+            StringBuilder filePath,
+            uint filePathLength,
+            uint flags);
+    }
+}
+'@ -ErrorAction Stop
+}
+
+function Resolve-ExistingPhysicalPath {
+    param([Parameter(Mandatory)] [string]$Path)
+
+    Initialize-NativePathApi
+    $fullPath = Resolve-FullFileSystemPath -Path $Path -MustExist
+    $handle = [CopyFromTo.NativePathMethods]::CreateFile(
+        $fullPath,
+        0,
+        7, # FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE
+        [IntPtr]::Zero,
+        3, # OPEN_EXISTING
+        0x02000000, # FILE_FLAG_BACKUP_SEMANTICS (required for directory handles)
+        [IntPtr]::Zero
+    )
+    if ($handle.IsInvalid) {
+        $errorCode = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+        $handle.Dispose()
+        throw [ComponentModel.Win32Exception]::new($errorCode, "Could not resolve the physical path for '$Path'.")
+    }
+
+    try {
+        [int]$capacity = 512
+        while ($true) {
+            $buffer = [Text.StringBuilder]::new($capacity)
+            $length = [CopyFromTo.NativePathMethods]::GetFinalPathNameByHandle($handle, $buffer, $capacity, 0)
+            if ($length -eq 0) {
+                $errorCode = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+                throw [ComponentModel.Win32Exception]::new($errorCode, "Could not resolve the physical path for '$Path'.")
+            }
+            if ($length -lt $capacity) {
+                $physicalPath = $buffer.ToString()
+                break
+            }
+            $capacity = [int]$length + 1
+        }
+    }
+    finally {
+        $handle.Dispose()
+    }
+
+    if ($physicalPath.StartsWith('\\?\UNC\', [StringComparison]::OrdinalIgnoreCase)) {
+        $physicalPath = '\\' + $physicalPath.Substring(8)
+    }
+    elseif ($physicalPath.StartsWith('\\?\', [StringComparison]::OrdinalIgnoreCase)) {
+        $physicalPath = $physicalPath.Substring(4)
+    }
+    return Resolve-FullFileSystemPath -Path $physicalPath
+}
+
+function Resolve-PhysicalFileSystemPath {
+    param(
+        [Parameter(Mandatory)] [string]$Path,
+        [switch]$MustExist
+    )
+
+    $fullPath = Resolve-FullFileSystemPath -Path $Path
+    if (Test-Path -LiteralPath $fullPath) {
+        return Resolve-ExistingPhysicalPath -Path $fullPath
+    }
+    if ($MustExist) {
+        throw "Path '$Path' does not exist."
+    }
+
+    # Resolve the nearest existing ancestor so a not-yet-created path beneath a
+    # junction or symlink is still compared using its physical destination.
+    $segments = [System.Collections.Generic.Stack[string]]::new()
+    $ancestor = $fullPath
+    while (-not (Test-Path -LiteralPath $ancestor)) {
+        $root = [IO.Path]::GetPathRoot($ancestor)
+        if ($ancestor.Equals($root, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "No existing filesystem ancestor could be resolved for '$Path'."
+        }
+        $segments.Push([IO.Path]::GetFileName($ancestor))
+        $ancestor = [IO.Path]::GetDirectoryName($ancestor)
+    }
+
+    $physicalPath = Resolve-ExistingPhysicalPath -Path $ancestor
+    while ($segments.Count -gt 0) {
+        $physicalPath = Join-Path $physicalPath $segments.Pop()
+    }
+    return Resolve-FullFileSystemPath -Path $physicalPath
 }
 
 function Test-PathIsWithin {
@@ -400,9 +512,17 @@ function Get-SourceFiles {
 
     $files = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
     $queue = [System.Collections.Generic.Queue[string]]::new()
+    $visited = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
     $queue.Enqueue($Root)
     while ($queue.Count -gt 0) {
         $folder = $queue.Dequeue()
+        if ($FollowLinks) {
+            $physicalFolder = Resolve-ExistingPhysicalPath -Path $folder
+            if (-not $visited.Add($physicalFolder)) {
+                Write-Log "Skipping already-visited directory target (reparse-point cycle or duplicate): $folder -> $physicalFolder" 'WARN'
+                continue
+            }
+        }
         foreach ($file in @(Get-ChildItem -LiteralPath $folder -File -ErrorAction Stop)) {
             if ($FollowLinks -or -not ($file.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
                 $files.Add($file)
@@ -439,7 +559,7 @@ function Split-FileNameBatches {
     if ($batch.Count -gt 0) { [pscustomobject]@{ Names = $batch.ToArray() } }
 }
 
-function Test-DestinationFreeSpace {
+function Write-DestinationFreeSpaceWarning {
     param(
         [Parameter(Mandatory)] [string]$Path,
         [Parameter(Mandatory)] [long]$RequiredBytes
@@ -449,10 +569,8 @@ function Test-DestinationFreeSpace {
         $drive = Get-PSDrive -Name $root.Substring(0, 1) -ErrorAction SilentlyContinue
         if ($drive -and $null -ne $drive.Free -and $drive.Free -lt $RequiredBytes) {
             Write-Log "Destination drive reports $($drive.Free) free bytes, less than the conservative $RequiredBytes-byte transfer estimate." 'WARN'
-            return $false
         }
     }
-    return $true
 }
 
 # ---------------------------------------------------------------------------
@@ -490,20 +608,33 @@ $aggregateRobocopyExit = 0
 $robocopyInvocationCount = 0
 
 try {
+    # PowerShell's built-in mandatory-parameter prompting prints an unavoidable
+    # "cmdlet <name> at command pipeline position 1" banner. Prompt manually for
+    # interactive runs, but fail deterministically rather than prompting under -Force.
+    if ([string]::IsNullOrWhiteSpace($Source)) {
+        if ($Force) { throw 'Source must be supplied when -Force is used.' }
+        Write-Host ''
+        $Source = Read-Host 'Source folder'
+    }
+    if ([string]::IsNullOrWhiteSpace($Destination)) {
+        if ($Force) { throw 'Destination must be supplied when -Force is used.' }
+        $Destination = Read-Host 'Destination folder'
+    }
+
+    if (-not (Test-Path -LiteralPath $Source -PathType Container)) {
+        throw "Source folder '$Source' does not exist or is not accessible. If this is a network share, confirm connectivity and permissions."
+    }
+    $Source = Resolve-PhysicalFileSystemPath -Path $Source -MustExist
+    $Destination = Resolve-PhysicalFileSystemPath -Path $Destination
+
     $logDirInput = if ($LogFolder) { $LogFolder } else { Join-Path $PSScriptRoot 'Logs' }
-    $logDir = Resolve-FullFileSystemPath -Path $logDirInput
+    $logDir = Resolve-PhysicalFileSystemPath -Path $logDirInput
     $previewOnly = [bool]($DryRun -or $WhatIfPreference)
     Initialize-Logging -Folder $logDir -RetentionDays $(if ($previewOnly) { 0 } else { $LogRetentionDays })
 
     if (-not (Get-Command robocopy.exe -ErrorAction SilentlyContinue)) {
         throw "robocopy.exe was not found. It ships with Windows; check your PATH."
     }
-
-    if (-not (Test-Path -LiteralPath $Source -PathType Container)) {
-        throw "Source folder '$Source' does not exist or is not accessible. If this is a network share, confirm connectivity and permissions."
-    }
-    $Source = Resolve-FullFileSystemPath -Path $Source -MustExist
-    $Destination = Resolve-FullFileSystemPath -Path $Destination
 
     Write-Log "CopyFromTo starting. Source='$Source' Destination='$Destination' DryRun=$($DryRun.IsPresent) WhatIf=$WhatIfPreference Recurse=$($Recurse.IsPresent) Force=$($Force.IsPresent) VerificationMode=$VerificationMode"
 
@@ -562,7 +693,18 @@ try {
     }
 
     # --- Compute the matching file set in PowerShell for preview/verification ---
-    $candidateFiles = @(Get-SourceFiles -Root $Source -Recursive:$Recurse -FollowLinks:$FollowReparsePoint)
+    $activeLogPaths = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($activeLogPath in @($script:LogFile, $script:RobocopyLogFile)) {
+        if ($activeLogPath) {
+            $null = $activeLogPaths.Add((Resolve-FullFileSystemPath -Path $activeLogPath))
+        }
+    }
+    $allCandidateFiles = @(Get-SourceFiles -Root $Source -Recursive:$Recurse -FollowLinks:$FollowReparsePoint)
+    $candidateFiles = @($allCandidateFiles | Where-Object { -not $activeLogPaths.Contains($_.FullName) })
+    $excludedActiveLogCount = $allCandidateFiles.Count - $candidateFiles.Count
+    if ($excludedActiveLogCount -gt 0) {
+        Write-Log "Excluded $excludedActiveLogCount active run log file(s) from the transfer set." 'WARN'
+    }
     $matchedFiles = @($candidateFiles | Where-Object {
         $file = $_
         $nameMatch = $false
@@ -642,7 +784,7 @@ try {
         }
     }
 
-    $null = Test-DestinationFreeSpace -Path $Destination -RequiredBytes ([long]$totalBytes)
+    Write-DestinationFreeSpaceWarning -Path $Destination -RequiredBytes ([long]$totalBytes)
 
     # --- Copy the exact previewed set, grouped by source directory ---
     $firstRobocopyLog = $true
