@@ -33,11 +33,21 @@ BeforeAll {
     }
 
     function Invoke-CopyFromTo {
-        param([string[]]$ScriptArgs)
-        $output = & $script:PwshExe -NoProfile -NonInteractive -File $script:ScriptPath @ScriptArgs 2>&1 | Out-String
-        [pscustomobject]@{
-            ExitCode = $LASTEXITCODE
-            Output   = $output
+        param(
+            [string[]]$ScriptArgs,
+            [string]$WorkingDirectory
+        )
+        $oldLocation = Get-Location
+        try {
+            if ($WorkingDirectory) { Set-Location -LiteralPath $WorkingDirectory }
+            $output = & $script:PwshExe -NoProfile -NonInteractive -File $script:ScriptPath @ScriptArgs 2>&1 | Out-String
+            [pscustomobject]@{
+                ExitCode = $LASTEXITCODE
+                Output   = $output
+            }
+        }
+        finally {
+            Set-Location -LiteralPath $oldLocation
         }
     }
 
@@ -45,8 +55,12 @@ BeforeAll {
     # Invoke-CopyFromTo, this must NOT pass -NonInteractive - that makes Read-Host throw
     # immediately instead of reading the piped answers.
     function Invoke-CopyFromToInteractive {
-        param([string[]]$ScriptArgs, [string[]]$Answers)
-        $output = $Answers | & $script:PwshExe -NoProfile -File $script:ScriptPath @ScriptArgs 2>&1 | Out-String
+        param(
+            [string[]]$ScriptArgs,
+            [string[]]$Answers,
+            [string]$ExecutableScript = $script:ScriptPath
+        )
+        $output = $Answers | & $script:PwshExe -NoProfile -File $ExecutableScript @ScriptArgs 2>&1 | Out-String
         [pscustomobject]@{
             ExitCode = $LASTEXITCODE
             Output   = $output
@@ -123,10 +137,86 @@ Describe 'CopyFromTo.ps1' {
 
             $result.ExitCode | Should -Be 0
             (Get-ChildItem $DestDir -File).Name | Sort-Object | Should -Be @('Ancient.txt', 'Future.txt')
+            $result.Output | Should -Match 'Matched\s*:\s+2'
+            $result.Output | Should -Match 'Verified\s*:\s+2'
+        }
+
+        It 'honors one-sided date bounds without adding hidden limits' {
+            New-TestFile "$SourceDir\Before1980.txt" -LastWriteTime '1970-01-01'
+            New-TestFile "$SourceDir\Modern.txt" -LastWriteTime '2024-05-01'
+            New-TestFile "$SourceDir\Future.txt" -LastWriteTime '2030-01-01'
+
+            $startOnlyDest = Join-Path $script:CaseRoot 'StartOnly'
+            $startResult = Invoke-CopyFromTo -ScriptArgs @(
+                '-Source', $SourceDir, '-Destination', $startOnlyDest,
+                '-FileName', '*.txt', '-StartDate', '2024-01-01', '-Force', '-LogFolder', $LogDir
+            )
+            $startResult.ExitCode | Should -Be 0
+            (Get-ChildItem $startOnlyDest -File).Name | Sort-Object | Should -Be @('Future.txt', 'Modern.txt')
+
+            $endOnlyDest = Join-Path $script:CaseRoot 'EndOnly'
+            $endResult = Invoke-CopyFromTo -ScriptArgs @(
+                '-Source', $SourceDir, '-Destination', $endOnlyDest,
+                '-FileName', '*.txt', '-EndDate', '2024-12-31', '-Force', '-LogFolder', $LogDir
+            )
+            $endResult.ExitCode | Should -Be 0
+            (Get-ChildItem $endOnlyDest -File).Name | Sort-Object | Should -Be @('Before1980.txt', 'Modern.txt')
+        }
+
+        It 'treats a command-line month EndDate as the end of that month' {
+            New-TestFile "$SourceDir\June30.txt" -LastWriteTime '2024-06-30'
+
+            $result = Invoke-CopyFromTo -ScriptArgs @(
+                '-Source', $SourceDir, '-Destination', $DestDir,
+                '-FileName', '*.txt', '-EndDate', '6/2024', '-Force', '-LogFolder', $LogDir
+            )
+
+            $result.ExitCode | Should -Be 0
+            Test-Path -LiteralPath "$DestDir\June30.txt" | Should -BeTrue
+        }
+
+        It 'copies only the exact previewed set rather than every wildcard match' {
+            New-TestFile "$SourceDir\InRange.txt" -LastWriteTime '2024-05-01'
+            New-TestFile "$SourceDir\OutOfRange.txt" -LastWriteTime '2030-01-01'
+
+            $result = Invoke-CopyFromTo -ScriptArgs @(
+                '-Source', $SourceDir, '-Destination', $DestDir,
+                '-FileName', '*.txt', '-EndDate', '2024-12-31', '-Force', '-LogFolder', $LogDir
+            )
+
+            $result.ExitCode | Should -Be 0
+            (Get-ChildItem $DestDir -File).Name | Should -Be 'InRange.txt'
+            Test-Path -LiteralPath "$DestDir\OutOfRange.txt" | Should -BeFalse
+        }
+
+        It 'uses the default wildcard to include extensionless files' {
+            New-TestFile "$SourceDir\LICENSE" -LastWriteTime '2024-05-01'
+
+            $result = Invoke-CopyFromTo -ScriptArgs @(
+                '-Source', $SourceDir, '-Destination', $DestDir,
+                '-Force', '-LogFolder', $LogDir
+            )
+
+            $result.ExitCode | Should -Be 0
+            Test-Path -LiteralPath "$DestDir\LICENSE" | Should -BeTrue
         }
     }
 
     Context 'Interactive prompts' {
+
+        It 'prompts for missing paths without PowerShell mandatory-parameter banner noise' {
+            New-TestFile "$SourceDir\File1.txt" -LastWriteTime '2024-05-01'
+
+            $result = Invoke-CopyFromToInteractive -Answers @($SourceDir, $DestDir, 'Y', 'Y') -ScriptArgs @(
+                '-FileName', '*.txt', '-StartDate', '2024-01-01', '-EndDate', '2024-12-31',
+                '-LogFolder', $LogDir
+            )
+
+            $result.ExitCode | Should -Be 0
+            $result.Output | Should -Not -Match 'cmdlet .* at command pipeline position'
+            Test-Path -LiteralPath "$DestDir\File1.txt" | Should -BeTrue
+            $result.Output | Should -Match 'finished with exit status 0\.\r?\n(?:\r?\n)+$'
+        }
 
         It 'parses a MM/yyyy date typed at the date-range prompt' {
             # Regression test: an earlier version threw "Cannot find an overload for
@@ -152,6 +242,19 @@ Describe 'CopyFromTo.ps1' {
             $result.ExitCode | Should -Be 0
             Test-Path -LiteralPath "$DestDir\Photo1.jpg" | Should -BeTrue
         }
+
+        It 'logs exit status 3 when the user cancels' {
+            New-TestFile "$SourceDir\File1.txt" -LastWriteTime '2024-05-01'
+            New-Item -ItemType Directory -Path $DestDir -Force | Out-Null
+
+            $result = Invoke-CopyFromToInteractive -Answers @('*.txt', '', '', 'n') -ScriptArgs @(
+                '-Source', $SourceDir, '-Destination', $DestDir, '-LogFolder', $LogDir
+            )
+
+            $result.ExitCode | Should -Be 3
+            $scriptLog = Get-ChildItem -LiteralPath $LogDir -Filter 'CopyFromTo_*.log' | Where-Object Name -NotLike '*_robocopy.log'
+            (Get-Content -LiteralPath $scriptLog.FullName -Raw) | Should -Match 'finished with exit status 3'
+        }
     }
 
     Context 'Dry run' {
@@ -167,6 +270,19 @@ Describe 'CopyFromTo.ps1' {
 
             $result.ExitCode | Should -Be 0
             Test-Path -LiteralPath $DestDir | Should -BeFalse
+        }
+
+        It 'supports the standard -WhatIf common parameter without changing the destination' {
+            New-TestFile "$SourceDir\File1.txt" -LastWriteTime '2024-05-01'
+
+            $result = Invoke-CopyFromTo -ScriptArgs @(
+                '-Source', $SourceDir, '-Destination', $DestDir,
+                '-FileName', '*.txt', '-Force', '-WhatIf', '-LogFolder', $LogDir
+            )
+
+            $result.ExitCode | Should -Be 0
+            Test-Path -LiteralPath $DestDir | Should -BeFalse
+            $result.Output | Should -Match 'WHATIF'
         }
     }
 
@@ -189,6 +305,14 @@ Describe 'CopyFromTo.ps1' {
 
     Context 'Error handling' {
 
+        It 'fails cleanly instead of prompting when -Force is missing required paths' {
+            $result = Invoke-CopyFromTo -ScriptArgs @('-Force')
+
+            $result.ExitCode | Should -Be 2
+            $result.Output | Should -Match 'Source must be supplied when -Force is used'
+            $result.Output | Should -Not -Match 'Read-Host'
+        }
+
         It 'exits 2 when the source folder does not exist' {
             $missingSource = Join-Path $script:CaseRoot 'DoesNotExist'
 
@@ -198,6 +322,25 @@ Describe 'CopyFromTo.ps1' {
             )
 
             $result.ExitCode | Should -Be 2
+        }
+
+        It 'rejects a start date later than the end date' {
+            $result = Invoke-CopyFromTo -ScriptArgs @(
+                '-Source', $SourceDir, '-Destination', $DestDir,
+                '-FileName', '*', '-StartDate', '2025-01-01', '-EndDate', '2024-01-01',
+                '-Force', '-LogFolder', $LogDir
+            )
+            $result.ExitCode | Should -Be 2
+            $result.Output | Should -Match 'cannot be later'
+        }
+
+        It 'rejects a normalized empty file-pattern list' {
+            $result = Invoke-CopyFromTo -ScriptArgs @(
+                '-Source', $SourceDir, '-Destination', $DestDir,
+                '-FileName', ',,', '-Force', '-LogFolder', $LogDir
+            )
+            $result.ExitCode | Should -Be 2
+            $result.Output | Should -Match 'non-empty file name'
         }
 
         It 'flags a real copy failure when a destination file is locked by another process' -Tag 'Slow' {
@@ -238,6 +381,75 @@ Describe 'CopyFromTo.ps1' {
             $result.ExitCode | Should -Be 0
             Test-Path -LiteralPath "$DestDir\File1.txt" | Should -BeTrue
         }
+
+        It 'supports relative source and destination paths' {
+            New-TestFile "$SourceDir\File1.txt" -LastWriteTime '2024-05-01'
+            $relativeSource = [System.IO.Path]::GetFileName($SourceDir)
+            $relativeDestination = 'RelativeDest'
+            $relativeLogs = 'RelativeLogs'
+
+            $result = Invoke-CopyFromTo -WorkingDirectory $script:CaseRoot -ScriptArgs @(
+                '-Source', $relativeSource, '-Destination', $relativeDestination,
+                '-FileName', '*.txt', '-Force', '-LogFolder', $relativeLogs
+            )
+
+            $result.ExitCode | Should -Be 0
+            Test-Path -LiteralPath (Join-Path $script:CaseRoot 'RelativeDest\File1.txt') | Should -BeTrue
+        }
+
+        It 'rejects identical source and destination paths' {
+            $result = Invoke-CopyFromTo -ScriptArgs @(
+                '-Source', $SourceDir, '-Destination', $SourceDir,
+                '-FileName', '*', '-Force', '-LogFolder', $LogDir
+            )
+            $result.ExitCode | Should -Be 2
+            $result.Output | Should -Match 'must be different'
+        }
+
+        It 'rejects a destination nested inside the source tree' {
+            $nestedDestination = Join-Path $SourceDir 'Backup'
+            $result = Invoke-CopyFromTo -ScriptArgs @(
+                '-Source', $SourceDir, '-Destination', $nestedDestination,
+                '-FileName', '*', '-Recurse', '-Force', '-LogFolder', $LogDir
+            )
+            $result.ExitCode | Should -Be 2
+            $result.Output | Should -Match 'cannot be inside source'
+        }
+
+        It 'rejects a destination junction that resolves to the source' {
+            $destinationAlias = Join-Path $script:CaseRoot 'DestinationAlias'
+            New-Item -ItemType Junction -Path $destinationAlias -Target $SourceDir | Out-Null
+            try {
+                $result = Invoke-CopyFromTo -ScriptArgs @(
+                    '-Source', $SourceDir, '-Destination', $destinationAlias,
+                    '-FileName', '*', '-Force', '-DryRun', '-LogFolder', $LogDir
+                )
+            }
+            finally {
+                Remove-Item -LiteralPath $destinationAlias -Force -ErrorAction SilentlyContinue
+            }
+
+            $result.ExitCode | Should -Be 2
+            $result.Output | Should -Match 'must be different'
+        }
+
+        It 'rejects a new destination beneath a junction that resolves into the source' {
+            $destinationAlias = Join-Path $script:CaseRoot 'DestinationAlias'
+            New-Item -ItemType Junction -Path $destinationAlias -Target $SourceDir | Out-Null
+            try {
+                $nestedThroughAlias = Join-Path $destinationAlias 'Backup'
+                $result = Invoke-CopyFromTo -ScriptArgs @(
+                    '-Source', $SourceDir, '-Destination', $nestedThroughAlias,
+                    '-FileName', '*', '-Recurse', '-Force', '-DryRun', '-LogFolder', $LogDir
+                )
+            }
+            finally {
+                Remove-Item -LiteralPath $destinationAlias -Force -ErrorAction SilentlyContinue
+            }
+
+            $result.ExitCode | Should -Be 2
+            $result.Output | Should -Match 'cannot be inside source'
+        }
     }
 
     Context 'Recurse' {
@@ -269,9 +481,62 @@ Describe 'CopyFromTo.ps1' {
             Test-Path -LiteralPath "$DestDir\Top.txt" | Should -BeTrue
             Test-Path -LiteralPath "$DestDir\Sub\Nested.txt" | Should -BeTrue
         }
+
+        It 'skips directory reparse points by default' {
+            New-TestFile "$SourceDir\Top.txt" -LastWriteTime '2024-05-01'
+            $externalDir = Join-Path $script:CaseRoot 'External'
+            New-TestFile "$externalDir\Linked.txt" -LastWriteTime '2024-05-01'
+            $junction = Join-Path $SourceDir 'Linked'
+            New-Item -ItemType Junction -Path $junction -Target $externalDir | Out-Null
+
+            $result = Invoke-CopyFromTo -ScriptArgs @(
+                '-Source', $SourceDir, '-Destination', $DestDir,
+                '-FileName', '*.txt', '-Recurse', '-Force', '-LogFolder', $LogDir
+            )
+
+            $result.ExitCode | Should -Be 0
+            Test-Path -LiteralPath "$DestDir\Top.txt" | Should -BeTrue
+            Test-Path -LiteralPath "$DestDir\Linked\Linked.txt" | Should -BeFalse
+            $result.Output | Should -Match 'Skipping reparse-point directory'
+        }
+
+        It 'detects reparse-point cycles when following links' {
+            New-TestFile "$SourceDir\Top.txt" -LastWriteTime '2024-05-01'
+            $loopJunction = Join-Path $SourceDir 'Loop'
+            New-Item -ItemType Junction -Path $loopJunction -Target $SourceDir | Out-Null
+            try {
+                $result = Invoke-CopyFromTo -ScriptArgs @(
+                    '-Source', $SourceDir, '-Destination', $DestDir,
+                    '-FileName', '*.txt', '-Recurse', '-FollowReparsePoint',
+                    '-Force', '-LogFolder', $LogDir
+                )
+            }
+            finally {
+                Remove-Item -LiteralPath $loopJunction -Force -ErrorAction SilentlyContinue
+            }
+
+            $result.ExitCode | Should -Be 0
+            Test-Path -LiteralPath "$DestDir\Top.txt" | Should -BeTrue
+            $result.Output | Should -Match 'already-visited directory target'
+        }
     }
 
     Context 'Logging' {
+
+        It 'excludes the active logs when the log folder is under a recursive source' {
+            New-TestFile "$SourceDir\File1.txt" -LastWriteTime '2024-05-01'
+            $sourceLogDir = Join-Path $SourceDir 'Logs'
+
+            $result = Invoke-CopyFromTo -ScriptArgs @(
+                '-Source', $SourceDir, '-Destination', $DestDir,
+                '-FileName', '*', '-Recurse', '-Force', '-LogFolder', $sourceLogDir
+            )
+
+            $result.ExitCode | Should -Be 0
+            Test-Path -LiteralPath "$DestDir\File1.txt" | Should -BeTrue
+            Test-Path -LiteralPath "$DestDir\Logs" | Should -BeFalse
+            $result.Output | Should -Match 'Excluded 1 active run log file'
+        }
 
         It 'writes a script log and a robocopy log for each run' {
             New-TestFile "$SourceDir\File1.txt" -LastWriteTime '2024-05-01'
@@ -297,6 +562,70 @@ Describe 'CopyFromTo.ps1' {
             $scriptLog = Get-ChildItem -LiteralPath $LogDir -Filter 'CopyFromTo_*.log' | Where-Object Name -NotLike '*_robocopy.log'
             (Get-Content -LiteralPath $scriptLog.FullName -Raw) | Should -Match 'Verification passed'
         }
+
+        It 'uses collision-resistant log names for rapid consecutive runs' {
+            New-TestFile "$SourceDir\File1.txt" -LastWriteTime '2024-05-01'
+            1..2 | ForEach-Object {
+                $null = Invoke-CopyFromTo -ScriptArgs @(
+                    '-Source', $SourceDir, '-Destination', $DestDir,
+                    '-FileName', '*.txt', '-Force', '-LogFolder', $LogDir
+                )
+            }
+            (Get-ChildItem -LiteralPath $LogDir -Filter 'CopyFromTo_*.log').Count | Should -Be 4
+        }
+
+        It 'removes expired logs only when retention is explicitly enabled' {
+            New-TestFile "$SourceDir\File1.txt" -LastWriteTime '2024-05-01'
+            New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
+            $oldLog = Join-Path $LogDir 'CopyFromTo_20000101_000000.log'
+            Set-Content -LiteralPath $oldLog -Value 'old'
+            (Get-Item $oldLog).LastWriteTime = (Get-Date).AddDays(-30)
+
+            $result = Invoke-CopyFromTo -ScriptArgs @(
+                '-Source', $SourceDir, '-Destination', $DestDir,
+                '-FileName', '*.txt', '-Force', '-LogFolder', $LogDir, '-LogRetentionDays', '7'
+            )
+            $result.ExitCode | Should -Be 0
+            Test-Path -LiteralPath $oldLog | Should -BeFalse
+        }
+    }
+
+    Context 'Verification and transfer controls' {
+
+        It 'supports SHA-256 hash verification and structured pass-through output' {
+            New-TestFile "$SourceDir\File1.txt" -Content 'hash me' -LastWriteTime '2024-05-01'
+            $result = Invoke-CopyFromTo -ScriptArgs @(
+                '-Source', $SourceDir, '-Destination', $DestDir,
+                '-FileName', '*.txt', '-Force', '-VerificationMode', 'Hash', '-PassThru',
+                '-LogFolder', $LogDir
+            )
+            $result.ExitCode | Should -Be 0
+            $result.Output | Should -Match 'VerificationMode.*Hash'
+        }
+
+        It 'honors configurable retry, wait, and thread settings' {
+            New-TestFile "$SourceDir\File1.txt" -LastWriteTime '2024-05-01'
+            $result = Invoke-CopyFromTo -ScriptArgs @(
+                '-Source', $SourceDir, '-Destination', $DestDir,
+                '-FileName', '*.txt', '-Force', '-RetryCount', '1', '-RetryWait', '1', '-Threads', '2',
+                '-LogFolder', $LogDir
+            )
+            $result.ExitCode | Should -Be 0
+            $result.Output | Should -Match '/R:1'
+            $result.Output | Should -Match '/W:1'
+            $result.Output | Should -Match '/MT:2'
+        }
+
+        It 'limits the console preview without limiting the actual transfer' {
+            1..3 | ForEach-Object { New-TestFile "$SourceDir\File$_.txt" -LastWriteTime '2024-05-01' }
+            $result = Invoke-CopyFromTo -ScriptArgs @(
+                '-Source', $SourceDir, '-Destination', $DestDir,
+                '-FileName', '*.txt', '-Force', '-PreviewLimit', '1', '-LogFolder', $LogDir
+            )
+            $result.ExitCode | Should -Be 0
+            (Get-ChildItem $DestDir -File).Count | Should -Be 3
+            $result.Output | Should -Match '2 additional match'
+        }
     }
 
     Context 'Script metadata' {
@@ -307,11 +636,8 @@ Describe 'CopyFromTo.ps1' {
         }
 
         It '-Help prints parameter descriptions and exits 0 without prompting for Source/Destination' {
-            # -Help lives in its own parameter set specifically so it works standalone -
-            # Source/Destination are Mandatory in the default set, and PowerShell prompts
-            # for missing mandatory parameters before any script code runs. -NonInteractive
-            # (via Invoke-CopyFromTo) turns any such stray prompt into a fast failure instead
-            # of a hang, so this also guards against a regression that reintroduces one.
+            # -Help lives in its own parameter set so help stays isolated from operational
+            # parameters and cannot trigger interactive path prompts.
             $result = Invoke-CopyFromTo -ScriptArgs @('-Help')
 
             $result.ExitCode | Should -Be 0
@@ -319,6 +645,23 @@ Describe 'CopyFromTo.ps1' {
             $result.Output | Should -Match '-Source'
             $result.Output | Should -Match '-Destination'
             $result.Output | Should -Match '-FileName'
+            $result.Output | Should -Match '-VerificationMode'
+        }
+
+        It 'parses and displays help under Windows PowerShell 5.1 when available' -Skip:(-not (Get-Command powershell.exe -ErrorAction SilentlyContinue)) {
+            $output = & powershell.exe -NoProfile -NonInteractive -File $script:ScriptPath -Help 2>&1 | Out-String
+            $LASTEXITCODE | Should -Be 0
+            $output | Should -Match 'SYNOPSIS'
+            $output | Should -Match '-VerificationMode'
+        }
+
+        It 'completes a functional copy under Windows PowerShell 5.1 when available' -Skip:(-not (Get-Command powershell.exe -ErrorAction SilentlyContinue)) {
+            New-TestFile "$SourceDir\WinPS.txt" -LastWriteTime '2024-05-01'
+            $output = & powershell.exe -NoProfile -NonInteractive -File $script:ScriptPath `
+                -Source $SourceDir -Destination $DestDir -FileName '*.txt' -Force -LogFolder $LogDir 2>&1 | Out-String
+            $LASTEXITCODE | Should -Be 0
+            Test-Path -LiteralPath "$DestDir\WinPS.txt" | Should -BeTrue
+            $output | Should -Match 'Verification passed'
         }
     }
 }
