@@ -4,15 +4,22 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A self-contained Windows PowerShell script, `CopyFromTo.ps1`, that copies files
-matching a name pattern and a last-modified date range from one folder to another
-(source/destination can be local or a UNC network share), then verifies the copy.
-There is no module manifest or build step. A Pester integration suite lives in
-`Tests\CopyFromTo.Tests.ps1`.
+A Windows PowerShell copy engine, `CopyFromTo.ps1`, that copies files matching a name
+pattern and a last-modified date range from one folder to another (source/destination
+can be local or a UNC network share), then verifies the copy. `CopyFromTo-UI.ps1` is a
+separate WPF front end that launches the engine as a child process; never duplicate copy
+logic in the UI or make the engine depend on WPF. There is no module manifest or build
+step. Pester integration tests live under `Tests\`.
 
 ## Running it
 
 ```powershell
+# Desktop UI
+.\CopyFromTo-UI.ps1
+
+# Validate the UI/XAML without opening a window
+.\CopyFromTo-UI.ps1 -ValidateOnly
+
 # Interactive: prompts for file name pattern(s) and MM/yyyy date range
 .\CopyFromTo.ps1 -Source 'C:\Data\Reports' -Destination '\\NAS\Archive\Reports'
 
