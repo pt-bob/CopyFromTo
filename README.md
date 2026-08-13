@@ -80,3 +80,83 @@ Invoke-Pester -Path .\Tests -Output Detailed
 
 The suite invokes the copy engine and UI validation as child processes and includes
 Windows PowerShell 5.1 compatibility coverage when available.
+
+## Build a Windows executable
+
+`Build-Executable.ps1` creates a standalone 64-bit Windows GUI executable using PS2EXE:
+
+```text
+CopyFromTo.exe
+```
+
+The build reads the unchanged `CopyFromTo.ps1` engine, verifies its SHA-256 hash, and
+injects it into the compiled UI. At runtime, the EXE writes that embedded engine to a
+unique folder beneath `%TEMP%`, verifies it before use, and removes the folder when the
+UI closes. No PowerShell script or other application file needs to accompany the EXE.
+
+### Prerequisite and build
+
+From PowerShell 7 or Windows PowerShell 5.1 in the repository folder:
+
+```powershell
+# Install the pinned build dependency and build dist\CopyFromTo.exe
+.\Build-Executable.ps1 -InstallDependency
+```
+
+The script pins PS2EXE 1.0.18 by default. It does not install anything unless
+`-InstallDependency` is explicitly supplied. Subsequent builds can use:
+
+```powershell
+.\Build-Executable.ps1
+```
+
+Optional metadata and icon:
+
+```powershell
+.\Build-Executable.ps1 `
+    -Version '1.2.0.0' `
+    -IconPath '.\Assets\CopyFromTo.ico'
+```
+
+Create a ready-to-distribute `CopyFromTo-1.2.0.0.zip` as well:
+
+```powershell
+.\Build-Executable.ps1 -Version '1.2.0.0' -CreateZip
+```
+
+`IconPath` must be a genuine Windows `.ico` file. Build output is ignored by Git under
+`dist\`. PS2EXE generates a .NET Framework Windows executable and requires the input
+script to remain compatible with Windows PowerShell 5.1. See the
+[PS2EXE project documentation](https://github.com/MScholtes/PS2EXE) for compiler
+details and options.
+
+### Test the artifact
+
+Run the resulting application directly:
+
+```powershell
+.\dist\CopyFromTo.exe
+```
+
+Copy the EXE to another folder without any `.ps1` files, launch it, then preview a small
+folder before using Copy files. The target computer needs Windows PowerShell 5.1 and
+Robocopy, both included with supported Windows installations.
+
+### Sign before wider distribution
+
+An unsigned internal executable can trigger Windows reputation or publisher warnings.
+For wider distribution, sign it with a trusted code-signing certificate after building.
+For example, from a Windows SDK Developer PowerShell prompt:
+
+```powershell
+signtool sign /fd SHA256 /td SHA256 /tr '<your RFC 3161 timestamp URL>' `
+    /a '.\dist\CopyFromTo.exe'
+
+signtool verify /pa /v '.\dist\CopyFromTo.exe'
+```
+
+Protect private keys and never commit a PFX file or its password. Microsoft documents
+[SignTool and its signing/verification options](https://learn.microsoft.com/windows/win32/seccrypto/signtool).
+
+PS2EXE packages PowerShell source; it does not make source code or embedded content
+confidential. Do not put credentials, tokens, or passwords in either script.

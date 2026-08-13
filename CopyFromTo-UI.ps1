@@ -29,21 +29,83 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# Build-Executable.ps1 changes this exact assignment to $true only in its
+# temporary compilation source. The checked-in script always remains in source mode.
+$script:IsPackagedExecutable = $false
+$script:EmbeddedEngineBase64 = '__COPYFROMTO_ENGINE_BASE64__'
+$script:EmbeddedEngineSha256 = '__COPYFROMTO_ENGINE_SHA256__'
+$script:RuntimeEngineFolder = $null
+$script:ApplicationRoot = if ($script:IsPackagedExecutable) {
+    [AppDomain]::CurrentDomain.BaseDirectory.TrimEnd([char[]]@('\', '/'))
+}
+else {
+    $PSScriptRoot
+}
 
 if ($Help) {
-    Get-Help -Detailed $PSCommandPath
+    if ($PSCommandPath) {
+        Get-Help -Detailed $PSCommandPath
+    }
+    else {
+        Write-Output 'Use CopyFromTo.exe -? -detailed to display the packaged application help.'
+    }
     exit 0
 }
 
-$script:EnginePath = Join-Path $PSScriptRoot 'CopyFromTo.ps1'
+$script:EnginePath = if ($script:IsPackagedExecutable) {
+    if ($script:EmbeddedEngineBase64 -eq '__COPYFROMTO_ENGINE_BASE64__') {
+        Write-Error 'The executable does not contain its copy engine. Rebuild it with Build-Executable.ps1.'
+        exit 2
+    }
+
+    $script:RuntimeEngineFolder = Join-Path ([IO.Path]::GetTempPath()) "PicnicTime.CopyFromTo\$PID-$([guid]::NewGuid().ToString('N'))"
+    $runtimeEnginePath = Join-Path $script:RuntimeEngineFolder 'CopyFromTo.ps1'
+    try {
+        New-Item -ItemType Directory -Path $script:RuntimeEngineFolder -Force | Out-Null
+        [IO.File]::WriteAllBytes(
+            $runtimeEnginePath,
+            [Convert]::FromBase64String($script:EmbeddedEngineBase64)
+        )
+        $sha256 = [Security.Cryptography.SHA256]::Create()
+        try {
+            $runtimeEngineHash = [BitConverter]::ToString(
+                $sha256.ComputeHash([IO.File]::ReadAllBytes($runtimeEnginePath))
+            ).Replace('-', '')
+        }
+        finally {
+            $sha256.Dispose()
+        }
+        if ($runtimeEngineHash -ne $script:EmbeddedEngineSha256) {
+            throw 'The embedded copy engine failed its integrity check.'
+        }
+        $runtimeEnginePath
+    }
+    catch {
+        if ($script:RuntimeEngineFolder -and (Test-Path -LiteralPath $script:RuntimeEngineFolder)) {
+            Remove-Item -LiteralPath $script:RuntimeEngineFolder -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        Write-Error "Could not prepare the embedded copy engine. $($_.Exception.Message)"
+        exit 2
+    }
+}
+else {
+    Join-Path $script:ApplicationRoot 'CopyFromTo.ps1'
+}
 if (-not (Test-Path -LiteralPath $script:EnginePath -PathType Leaf)) {
-    Write-Error "Copy engine not found: '$script:EnginePath'. Keep CopyFromTo-UI.ps1 beside CopyFromTo.ps1."
+    Write-Error "Copy engine not found: '$script:EnginePath'. Rebuild the executable or keep CopyFromTo-UI.ps1 beside CopyFromTo.ps1."
     exit 2
+}
+
+function Remove-RuntimeEngine {
+    if ($script:RuntimeEngineFolder -and (Test-Path -LiteralPath $script:RuntimeEngineFolder)) {
+        Remove-Item -LiteralPath $script:RuntimeEngineFolder -Recurse -Force -ErrorAction SilentlyContinue
+        $script:RuntimeEngineFolder = $null
+    }
 }
 
 # Always isolate the interactive UI from the terminal, even when the caller already
 # happens to be STA. The child has no visible console; only the WPF window is shown.
-if (-not $ValidateOnly -and -not $UiHost) {
+if (-not $script:IsPackagedExecutable -and -not $ValidateOnly -and -not $UiHost) {
     try {
         $powerShellExe = (Get-Process -Id $PID).Path
         $quotedScriptPath = '"' + $PSCommandPath.Replace('"', '\"') + '"'
@@ -60,7 +122,7 @@ if (-not $ValidateOnly -and -not $UiHost) {
 
 # Layout validation creates an invisible real window and therefore also needs STA.
 # Run it synchronously so its output and exit code remain available to callers/tests.
-if ($ValidateOnly -and [Threading.Thread]::CurrentThread.ApartmentState -ne 'STA') {
+if (-not $script:IsPackagedExecutable -and $ValidateOnly -and [Threading.Thread]::CurrentThread.ApartmentState -ne 'STA') {
     $powerShellExe = (Get-Process -Id $PID).Path
     & $powerShellExe -NoLogo -NoProfile -STA -File $PSCommandPath -ValidateOnly -UiHost
     exit $LASTEXITCODE
@@ -327,7 +389,7 @@ if (-not $ValidateOnly -and [Threading.Thread]::CurrentThread.ApartmentState -ne
 
             <Border Grid.Column="2" Background="{DynamicResource OutputHeaderBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="8">
                 <Grid Margin="0">
-                    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+                    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                     <Grid Grid.Row="0" Margin="16,12">
                         <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                         <TextBlock Text="Operation output" Foreground="{DynamicResource TextBrush}" FontWeight="SemiBold" FontSize="15" />
@@ -339,6 +401,11 @@ if (-not $ValidateOnly -and [Threading.Thread]::CurrentThread.ApartmentState -ne
                              VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto"
                              TextWrapping="NoWrap" FontFamily="Consolas" FontSize="12" Background="{DynamicResource OutputBackgroundBrush}"
                              Foreground="{DynamicResource OutputTextBrush}" BorderThickness="0" Padding="14" />
+                    <Border x:Name="OperationResultBorder" Grid.Row="2" Visibility="Collapsed"
+                            Padding="14,11" CornerRadius="0,0,7,7">
+                        <TextBlock x:Name="OperationResultTextBlock" Foreground="White" FontSize="18"
+                                   FontWeight="Bold" TextAlignment="Center" />
+                    </Border>
                 </Grid>
             </Border>
         </Grid>
@@ -376,6 +443,7 @@ $requiredControls = @(
     'LogFolderTextBox', 'BrowseSourceButton', 'BrowseDestinationButton', 'BrowseLogButton',
     'ThemeToggleButton',
     'PreviewButton', 'CopyButton', 'CancelButton', 'ClearOutputButton', 'OutputTextBox',
+    'OperationResultBorder', 'OperationResultTextBlock',
     'StatusTextBlock', 'StatusIndicator'
 )
 foreach ($controlName in $requiredControls) {
@@ -391,7 +459,16 @@ Add-Type -AssemblyName System.Windows.Forms
 $script:ActiveProcess = $null
 $script:CancelRequested = $false
 $script:OutputCollector = $null
-$script:PowerShellExe = (Get-Process -Id $PID).Path
+$script:PowerShellExe = if ($script:IsPackagedExecutable) {
+    Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+}
+else {
+    (Get-Process -Id $PID).Path
+}
+if (-not (Test-Path -LiteralPath $script:PowerShellExe -PathType Leaf)) {
+    Write-Error "PowerShell executable not found: '$script:PowerShellExe'."
+    exit 2
+}
 $script:DarkMode = $false
 
 function New-SolidColorBrush {
@@ -505,7 +582,8 @@ if ($ValidateOnly) {
         $captureCollector.Dispose()
         $captureProcess.Dispose()
     }
-    Write-Output "CopyFromTo UI validation passed. Title='$($window.Title)'; Themes=Light,Dark; DarkContrast=True; OutputLayout=True; RenderMode=$([Windows.Media.RenderOptions]::ProcessRenderMode); IsolatedHost=True; OutputCapture=True; Engine='$script:EnginePath'; Controls=$($requiredControls.Count)."
+    Write-Output "CopyFromTo UI validation passed. Title='$($window.Title)'; Themes=Light,Dark; DarkContrast=True; OutputLayout=True; RenderMode=$([Windows.Media.RenderOptions]::ProcessRenderMode); IsolatedHost=True; Packaged=$script:IsPackagedExecutable; OutputCapture=True; Engine='$script:EnginePath'; Controls=$($requiredControls.Count)."
+    Remove-RuntimeEngine
     exit 0
 }
 
@@ -539,6 +617,27 @@ function Add-OutputLine {
     param([string]$Text = '')
     $OutputTextBox.AppendText($Text + [Environment]::NewLine)
     $OutputTextBox.ScrollToEnd()
+}
+
+function Clear-OperationResult {
+    $OperationResultTextBlock.Text = ''
+    $OperationResultBorder.Visibility = 'Collapsed'
+}
+
+function Set-OperationResult {
+    param(
+        [Parameter(Mandatory)]
+        [ValidateSet('Success', 'Failed')]
+        [string]$Result,
+
+        [Parameter(Mandatory)]
+        [string]$Detail
+    )
+
+    $succeeded = $Result -eq 'Success'
+    $OperationResultTextBlock.Text = "$(if ($succeeded) { 'SUCCESS' } else { 'FAILED' }) - $Detail"
+    $OperationResultBorder.Background = if ($succeeded) { '#15803D' } else { '#B91C1C' }
+    $OperationResultBorder.Visibility = 'Visible'
 }
 
 function Set-UiRunningState {
@@ -682,6 +781,7 @@ function Start-CopyOperation {
     }
 
     $OutputTextBox.Clear()
+    Clear-OperationResult
     Add-OutputLine ('> ' + (Split-Path -Leaf $script:PowerShellExe) + ' ' + (($arguments | ForEach-Object { ConvertTo-CommandLineArgument $_ }) -join ' '))
     Add-OutputLine
 
@@ -710,6 +810,7 @@ function Start-CopyOperation {
     catch {
         $collector.Dispose()
         $process.Dispose()
+        Set-OperationResult -Result Failed -Detail 'The copy process could not be started.'
         [Windows.MessageBox]::Show("Could not start CopyFromTo.ps1. $($_.Exception.Message)", 'Launch failed', 'OK', 'Error') | Out-Null
     }
 }
@@ -736,7 +837,10 @@ $BrowseLogButton.Add_Click({
 $ThemeToggleButton.Add_Click({
     Set-UiTheme $(if ($script:DarkMode) { 'Light' } else { 'Dark' })
 })
-$ClearOutputButton.Add_Click({ $OutputTextBox.Clear() })
+$ClearOutputButton.Add_Click({
+    $OutputTextBox.Clear()
+    Clear-OperationResult
+})
 $PreviewButton.Add_Click({ Start-CopyOperation -Preview })
 $CopyButton.Add_Click({ Start-CopyOperation })
 $CancelButton.Add_Click({
@@ -776,16 +880,19 @@ $timer.Add_Tick({
             Add-OutputLine 'Operation cancelled.'
             $StatusTextBlock.Text = 'Cancelled'
             $StatusIndicator.Fill = '#EF4444'
+            Set-OperationResult -Result Failed -Detail 'Operation cancelled.'
         }
         elseif ($exitCode -eq 0) {
             $StatusTextBlock.Text = 'Completed successfully'
             $StatusIndicator.Fill = '#22C55E'
+            Set-OperationResult -Result Success -Detail 'Operation completed successfully.'
         }
         else {
             Add-OutputLine
             Add-OutputLine "CopyFromTo exited with status $exitCode. Review the output above."
             $StatusTextBlock.Text = "Finished with errors (exit $exitCode)"
             $StatusIndicator.Fill = '#EF4444'
+            Set-OperationResult -Result Failed -Detail "CopyFromTo exited with status $exitCode."
         }
     }
 })
@@ -819,4 +926,7 @@ catch {
     }
     catch { }
     exit 2
+}
+finally {
+    Remove-RuntimeEngine
 }

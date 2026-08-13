@@ -28,7 +28,17 @@ Describe 'CopyFromTo desktop UI' {
         $output | Should -Match 'RenderMode=SoftwareOnly'
         $output | Should -Match 'IsolatedHost=True'
         $output | Should -Match 'OutputCapture=True'
-        $output | Should -Match 'Controls=28'
+        $output | Should -Match 'Controls=30'
+    }
+
+    It 'shows a green SUCCESS or red FAILED banner after an operation' {
+        $uiText = Get-Content -LiteralPath $script:UiPath -Raw
+
+        $uiText | Should -Match 'OperationResultBorder'
+        $uiText | Should -Match "'SUCCESS'"
+        $uiText | Should -Match "'FAILED'"
+        $uiText | Should -Match "'#15803D'"
+        $uiText | Should -Match "'#B91C1C'"
     }
 
     It 'provides command-line help without opening the window' {

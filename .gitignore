@@ -7,3 +7,7 @@ Logs/
 # Backup versions
 TEMP/
 
+# Local executable build artifacts
+dist/
+CopyFromTo-*.zip
+

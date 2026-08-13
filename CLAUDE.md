@@ -8,8 +8,17 @@ A Windows PowerShell copy engine, `CopyFromTo.ps1`, that copies files matching a
 pattern and a last-modified date range from one folder to another (source/destination
 can be local or a UNC network share), then verifies the copy. `CopyFromTo-UI.ps1` is a
 separate WPF front end that launches the engine as a child process; never duplicate copy
-logic in the UI or make the engine depend on WPF. There is no module manifest or build
-step. Pester integration tests live under `Tests\`.
+logic in the UI or make the engine depend on WPF. There is no module manifest. Pester
+integration tests live under `Tests\`.
+
+`Build-Executable.ps1` is the reproducible Windows packaging entry point. It injects a
+Base64 representation and SHA-256 hash of the unchanged engine into a temporary UI
+build input, then compiles that input with a pinned PS2EXE version. The final EXE is
+standalone. The temporary build input explicitly enables packaged mode; at runtime the
+UI materializes and verifies the engine in a unique `%TEMP%` folder, launches it with
+Windows PowerShell 5.1, and removes it when the UI closes. Keep `dist\` and generated
+ZIP packages out of version control; never commit a generated UI containing the Base64
+blob.
 
 ## Running it
 
