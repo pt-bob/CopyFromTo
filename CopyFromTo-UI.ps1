@@ -773,10 +773,29 @@ function Start-CopyOperation {
     }
 
     if (-not $Preview) {
-        $confirmation = [Windows.MessageBox]::Show(
-            "Copy matching files now?`n`nFrom: $($SourceTextBox.Text.Trim())`nTo:   $($DestinationTextBox.Text.Trim())",
-            'Confirm copy', 'YesNo', 'Question'
-        )
+        $source = $SourceTextBox.Text.Trim()
+        $destination = $DestinationTextBox.Text.Trim()
+        if (Test-Path -LiteralPath $destination -PathType Leaf) {
+            [Windows.MessageBox]::Show(
+                "The destination path is an existing file, not a folder:`n`n$destination",
+                'Invalid destination', 'OK', 'Error'
+            ) | Out-Null
+            return
+        }
+
+        $destinationExists = Test-Path -LiteralPath $destination -PathType Container
+        if ($destinationExists) {
+            $confirmation = [Windows.MessageBox]::Show(
+                "Copy matching files now?`n`nFrom: $source`nTo:   $destination",
+                'Confirm copy', 'YesNo', 'Question'
+            )
+        }
+        else {
+            $confirmation = [Windows.MessageBox]::Show(
+                "The destination folder does not exist:`n`n$destination`n`nCopyFromTo will create it before copying files.`n`nCreate the folder and start copying?",
+                'Create destination folder?', 'YesNo', 'Warning'
+            )
+        }
         if ($confirmation -ne 'Yes') { return }
     }
 

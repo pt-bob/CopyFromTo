@@ -41,6 +41,16 @@ Describe 'CopyFromTo desktop UI' {
         $uiText | Should -Match "'#B91C1C'"
     }
 
+    It 'requires confirmation before copying to a missing destination folder' {
+        $uiText = Get-Content -LiteralPath $script:UiPath -Raw
+
+        $uiText | Should -Match 'Test-Path -LiteralPath \$destination -PathType Container'
+        $uiText | Should -Match 'The destination folder does not exist:'
+        $uiText | Should -Match 'Create the folder and start copying\?'
+        $uiText | Should -Match "'Create destination folder\?', 'YesNo', 'Warning'"
+        $uiText | Should -Match 'if \(\$confirmation -ne ''Yes''\) \{ return \}'
+    }
+
     It 'provides command-line help without opening the window' {
         $output = & $script:PowerShellExe -NoProfile -NonInteractive -File $script:UiPath -Help 2>&1 | Out-String
 
