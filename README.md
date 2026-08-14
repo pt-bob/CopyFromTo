@@ -21,6 +21,7 @@ The desktop interface provides:
 - fast metadata or thorough SHA-256 verification;
 - advanced Robocopy retry, wait, thread, timestamp, and preview settings;
 - a safe preview that makes no destination changes;
+- a prominent preview summary with the exact matched file count and total size;
 - live operation output and clear completion status;
 - a green activity bar with elapsed time during long previews and copies;
 - responsive, bounded output rendering for very large file groups;

@@ -86,6 +86,11 @@
     default, reparse-point directories are skipped to avoid loops and copying data
     outside the apparent source tree.
 
+.PARAMETER PreviewSummaryPath
+    Optional path where a dry run writes a small JSON summary containing the exact
+    matched file count and total bytes. Intended for trusted UI or automation callers.
+    The normal console output and copy behavior are unchanged.
+
 .PARAMETER PassThru
     Emit a structured result object after a completed copy. By default, results are
     displayed and logged without adding an object to the success output stream.
@@ -179,6 +184,9 @@ param(
 
     [Parameter(ParameterSetName = 'Default')]
     [switch]$FollowReparsePoint,
+
+    [Parameter(ParameterSetName = 'Default')]
+    [string]$PreviewSummaryPath,
 
     [Parameter(ParameterSetName = 'Default')]
     [switch]$PassThru,
@@ -630,6 +638,9 @@ try {
     $logDirInput = if ($LogFolder) { $LogFolder } else { Join-Path $PSScriptRoot 'Logs' }
     $logDir = Resolve-PhysicalFileSystemPath -Path $logDirInput
     $previewOnly = [bool]($DryRun -or $WhatIfPreference)
+    if ($PreviewSummaryPath -and -not $previewOnly) {
+        throw 'PreviewSummaryPath can only be used with -DryRun or -WhatIf.'
+    }
     Initialize-Logging -Folder $logDir -RetentionDays $(if ($previewOnly) { 0 } else { $LogRetentionDays })
 
     if (-not (Get-Command robocopy.exe -ErrorAction SilentlyContinue)) {
@@ -717,14 +728,37 @@ try {
         return $true
     })
 
+    [long]$totalBytes = if ($matchedFiles.Count -eq 0) {
+        0
+    }
+    else {
+        ($matchedFiles | Measure-Object -Property Length -Sum).Sum
+    }
+
     Write-Log "$($matchedFiles.Count) file(s) matched the name pattern(s) and date range."
+
+    if ($PreviewSummaryPath) {
+        $summaryParent = Split-Path -Parent $PreviewSummaryPath
+        if ([string]::IsNullOrWhiteSpace($summaryParent) -or
+            -not (Test-Path -LiteralPath $summaryParent -PathType Container)) {
+            throw "Preview summary folder does not exist: '$summaryParent'."
+        }
+
+        $previewSummary = [ordered]@{
+            SchemaVersion = 1
+            MatchedFiles  = $matchedFiles.Count
+            TotalBytes    = $totalBytes
+            GeneratedUtc  = [datetime]::UtcNow.ToString('o')
+        }
+        $previewSummary | ConvertTo-Json -Compress |
+            Set-Content -LiteralPath $PreviewSummaryPath -Encoding UTF8 -ErrorAction Stop
+    }
 
     if ($matchedFiles.Count -eq 0) {
         Write-Log 'Nothing to copy.' 'WARN'
         exit 0
     }
 
-    $totalBytes = ($matchedFiles | Measure-Object -Property Length -Sum).Sum
     Write-Host ''
     Write-Host "Matched files (total $([math]::Round($totalBytes / 1MB, 2)) MB):" -ForegroundColor Cyan
     $previewFiles = if ($PreviewLimit -gt 0) { @($matchedFiles | Select-Object -First $PreviewLimit) } else { $matchedFiles }

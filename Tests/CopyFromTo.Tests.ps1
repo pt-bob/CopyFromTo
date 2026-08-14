@@ -626,6 +626,60 @@ Describe 'CopyFromTo.ps1' {
             (Get-ChildItem $DestDir -File).Count | Should -Be 3
             $result.Output | Should -Match '2 additional match'
         }
+
+        It 'exports the exact matched count and byte total for a dry-run preview' {
+            New-TestFile "$SourceDir\One.txt" -Content 'first' -LastWriteTime '2024-05-01'
+            New-TestFile "$SourceDir\Two.txt" -Content 'second file' -LastWriteTime '2024-05-01'
+            New-TestFile "$SourceDir\Ignore.csv" -Content 'ignored' -LastWriteTime '2024-05-01'
+            $expectedBytes = (Get-ChildItem -LiteralPath $SourceDir -Filter '*.txt' -File |
+                Measure-Object -Property Length -Sum).Sum
+            $summaryPath = Join-Path $TestDrive 'preview-summary.json'
+
+            $result = Invoke-CopyFromTo -ScriptArgs @(
+                '-Source', $SourceDir, '-Destination', $DestDir,
+                '-FileName', '*.txt', '-Force', '-DryRun',
+                '-PreviewSummaryPath', $summaryPath, '-LogFolder', $LogDir
+            )
+            $summary = Get-Content -LiteralPath $summaryPath -Raw | ConvertFrom-Json
+
+            $result.ExitCode | Should -Be 0
+            $summary.SchemaVersion | Should -Be 1
+            $summary.MatchedFiles | Should -Be 2
+            $summary.TotalBytes | Should -Be $expectedBytes
+            Test-Path -LiteralPath $DestDir | Should -BeFalse
+        }
+
+        It 'exports a zero-valued preview summary when no files match' {
+            New-TestFile "$SourceDir\File.txt" -LastWriteTime '2024-05-01'
+            $summaryPath = Join-Path $TestDrive 'empty-preview-summary.json'
+
+            $result = Invoke-CopyFromTo -ScriptArgs @(
+                '-Source', $SourceDir, '-Destination', $DestDir,
+                '-FileName', '*.csv', '-Force', '-DryRun',
+                '-PreviewSummaryPath', $summaryPath, '-LogFolder', $LogDir
+            )
+            $summary = Get-Content -LiteralPath $summaryPath -Raw | ConvertFrom-Json
+
+            $result.ExitCode | Should -Be 0
+            $summary.MatchedFiles | Should -Be 0
+            $summary.TotalBytes | Should -Be 0
+        }
+
+        It 'rejects a preview summary path during a real copy' {
+            New-TestFile "$SourceDir\File.txt" -LastWriteTime '2024-05-01'
+            $summaryPath = Join-Path $TestDrive 'invalid-summary.json'
+
+            $result = Invoke-CopyFromTo -ScriptArgs @(
+                '-Source', $SourceDir, '-Destination', $DestDir,
+                '-FileName', '*.txt', '-Force',
+                '-PreviewSummaryPath', $summaryPath, '-LogFolder', $LogDir
+            )
+
+            $result.ExitCode | Should -Be 2
+            $result.Output | Should -Match 'PreviewSummaryPath can only be used'
+            Test-Path -LiteralPath $summaryPath | Should -BeFalse
+            Test-Path -LiteralPath $DestDir | Should -BeFalse
+        }
     }
 
     Context 'Script metadata' {
@@ -646,6 +700,7 @@ Describe 'CopyFromTo.ps1' {
             $result.Output | Should -Match '-Destination'
             $result.Output | Should -Match '-FileName'
             $result.Output | Should -Match '-VerificationMode'
+            $result.Output | Should -Match '-PreviewSummaryPath'
         }
 
         It 'parses and displays help under Windows PowerShell 5.1 when available' -Skip:(-not (Get-Command powershell.exe -ErrorAction SilentlyContinue)) {

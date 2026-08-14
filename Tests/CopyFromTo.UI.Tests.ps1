@@ -21,16 +21,17 @@ Describe 'CopyFromTo desktop UI' {
 
         $LASTEXITCODE | Should -Be 0
         $output | Should -Match 'UI validation passed'
-        $output | Should -Match "Title='CopyFromTo \(Picnic Time\)'"
+        $output | Should -Match "Title='CopyFromTo v1\.1 \(Picnic Time\)'"
         $output | Should -Match 'Themes=Light,Dark'
         $output | Should -Match 'DarkContrast=True'
         $output | Should -Match 'DateFilters=True'
         $output | Should -Match 'ActivityIndicator=True'
+        $output | Should -Match 'PreviewSummary=True'
         $output | Should -Match 'OutputLayout=True'
         $output | Should -Match 'RenderMode=SoftwareOnly'
         $output | Should -Match 'IsolatedHost=True'
         $output | Should -Match 'OutputCapture=True'
-        $output | Should -Match 'Controls=32'
+        $output | Should -Match 'Controls=36'
     }
 
     It 'shows a green SUCCESS or red FAILED banner after an operation' {
@@ -73,9 +74,41 @@ Describe 'CopyFromTo desktop UI' {
         $uiText | Should -Match 'Write-ProcessOutputBatch -MaximumLines 400'
     }
 
+    It 'displays the application version in the title bar' {
+        $uiText = Get-Content -LiteralPath $script:UiPath -Raw
+
+        $uiText | Should -Match "ApplicationVersion = '1\.1\.0\.0'"
+        $uiText | Should -Match "CopyFromTo v\{0\}\.\{1\} \(Picnic Time\)"
+        $uiText | Should -Match 'parsedApplicationVersion\.Major'
+        $uiText | Should -Match 'parsedApplicationVersion\.Minor'
+    }
+
+    It 'shows an exact, prominent summary after a successful preview' {
+        $uiText = Get-Content -LiteralPath $script:UiPath -Raw
+
+        $uiText | Should -Match 'PreviewSummaryBorder'
+        $uiText | Should -Match 'PREVIEW SUMMARY'
+        $uiText | Should -Match 'PreviewSummaryCountTextBlock'
+        $uiText | Should -Match 'PreviewSummarySizeTextBlock'
+        $uiText | Should -Match "'-PreviewSummaryPath'"
+        $uiText | Should -Match 'Show-PreviewSummary -Path \$previewSummaryPath'
+        $uiText | Should -Match 'SchemaVersion.+-ne 1'
+        $uiText | Should -Match 'Remove-PreviewSummaryFile'
+    }
+
+    It 'invalidates a preview summary when matching settings change' {
+        $uiText = Get-Content -LiteralPath $script:UiPath -Raw
+
+        $uiText | Should -Match '\$SourceTextBox\.Add_TextChanged\(\{ Clear-PreviewSummary \}\)'
+        $uiText | Should -Match '\$FileNameTextBox\.Add_TextChanged\(\{ Clear-PreviewSummary \}\)'
+        $uiText | Should -Match '\$StartDatePicker\.Add_SelectedDateChanged\(\{ Clear-PreviewSummary \}\)'
+        $uiText | Should -Match '\$RecurseCheckBox\.Add_Checked\(\{ Clear-PreviewSummary \}\)'
+    }
+
     It 'cancels the child process tree and restores the controls after completion' {
         $uiText = Get-Content -LiteralPath $script:UiPath -Raw
 
+        $uiText | Should -Match 'x:Name="CancelButton".+Width="138"'
         $uiText | Should -Match 'taskkill\.exe /PID \$script:ActiveProcess\.Id /T /F'
         $uiText | Should -Match '\$CancelButton\.Content = ''Cancelling'
         $uiText | Should -Match 'Complete-CopyOperation'
