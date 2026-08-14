@@ -412,12 +412,19 @@ if (-not $ValidateOnly -and [Threading.Thread]::CurrentThread.ApartmentState -ne
 
         <Grid Grid.Row="2" Margin="2,16,2,0">
             <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-            <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                <Ellipse x:Name="StatusIndicator" Width="9" Height="9" Fill="#22C55E" Margin="0,0,8,0" />
-                <TextBlock x:Name="StatusTextBlock" Text="Ready" Foreground="{DynamicResource MutedTextBrush}" VerticalAlignment="Center" />
+            <StackPanel VerticalAlignment="Center">
+                <StackPanel Orientation="Horizontal">
+                    <Ellipse x:Name="StatusIndicator" Width="9" Height="9" Fill="#22C55E" Margin="0,0,8,0" />
+                    <TextBlock x:Name="StatusTextBlock" Text="Ready" Foreground="{DynamicResource MutedTextBrush}" VerticalAlignment="Center" />
+                    <TextBlock x:Name="ElapsedTextBlock" Visibility="Collapsed" Foreground="{DynamicResource MutedTextBrush}"
+                               FontWeight="SemiBold" Margin="12,0,0,0" VerticalAlignment="Center" />
+                </StackPanel>
+                <ProgressBar x:Name="ActivityProgressBar" Visibility="Collapsed" IsIndeterminate="True"
+                             Width="400" Height="7" HorizontalAlignment="Left" Margin="0,7,0,0"
+                             Foreground="#22C55E" Background="{DynamicResource BorderBrush}" BorderThickness="0" />
             </StackPanel>
             <StackPanel Grid.Column="1" Orientation="Horizontal">
-                <Button x:Name="CancelButton" Content="Cancel" Style="{StaticResource SecondaryButton}" Width="82" Margin="0,0,8,0" IsEnabled="False" />
+                <Button x:Name="CancelButton" Content="Cancel" Style="{StaticResource SecondaryButton}" Width="118" Margin="0,0,8,0" IsEnabled="False" />
                 <Button x:Name="PreviewButton" Content="Preview" Style="{StaticResource SecondaryButton}" Width="92" Margin="0,0,8,0" />
                 <Button x:Name="CopyButton" Content="Copy files" Style="{StaticResource PrimaryButton}" Width="112" />
             </StackPanel>
@@ -444,7 +451,7 @@ $requiredControls = @(
     'ThemeToggleButton',
     'PreviewButton', 'CopyButton', 'CancelButton', 'ClearOutputButton', 'OutputTextBox',
     'OperationResultBorder', 'OperationResultTextBlock',
-    'StatusTextBlock', 'StatusIndicator'
+    'StatusTextBlock', 'StatusIndicator', 'ElapsedTextBlock', 'ActivityProgressBar'
 )
 foreach ($controlName in $requiredControls) {
     $control = $window.FindName($controlName)
@@ -458,6 +465,9 @@ foreach ($controlName in $requiredControls) {
 Add-Type -AssemblyName System.Windows.Forms
 $script:ActiveProcess = $null
 $script:CancelRequested = $false
+$script:OperationStopwatch = $null
+$script:PendingExitCode = $null
+$script:OperationElapsed = $null
 $script:OutputCollector = $null
 $script:PowerShellExe = if ($script:IsPackagedExecutable) {
     Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
@@ -548,6 +558,13 @@ if ($ValidateOnly) {
     $StartDatePicker.SelectedDate = $null
     $EndDatePicker.SelectedDate = $null
 
+    if ($ActivityProgressBar.Visibility -ne 'Collapsed' -or
+        -not $ActivityProgressBar.IsIndeterminate -or
+        $ActivityProgressBar.Foreground.Color.ToString() -ne '#FF22C55E' -or
+        $ElapsedTextBlock.Visibility -ne 'Collapsed') {
+        throw 'Operation activity indicator validation failed.'
+    }
+
     $OutputTextBox.Text = 'output-visibility-probe'
     $window.ShowActivated = $false
     $window.ShowInTaskbar = $false
@@ -595,7 +612,7 @@ if ($ValidateOnly) {
         $captureCollector.Dispose()
         $captureProcess.Dispose()
     }
-    Write-Output "CopyFromTo UI validation passed. Title='$($window.Title)'; Themes=Light,Dark; DarkContrast=True; DateFilters=True; OutputLayout=True; RenderMode=$([Windows.Media.RenderOptions]::ProcessRenderMode); IsolatedHost=True; Packaged=$script:IsPackagedExecutable; OutputCapture=True; Engine='$script:EnginePath'; Controls=$($requiredControls.Count)."
+    Write-Output "CopyFromTo UI validation passed. Title='$($window.Title)'; Themes=Light,Dark; DarkContrast=True; DateFilters=True; ActivityIndicator=True; OutputLayout=True; RenderMode=$([Windows.Media.RenderOptions]::ProcessRenderMode); IsolatedHost=True; Packaged=$script:IsPackagedExecutable; OutputCapture=True; Engine='$script:EnginePath'; Controls=$($requiredControls.Count)."
     Remove-RuntimeEngine
     exit 0
 }
@@ -632,6 +649,32 @@ function Add-OutputLine {
     $OutputTextBox.ScrollToEnd()
 }
 
+function Write-ProcessOutputBatch {
+    param([int]$MaximumLines = 200)
+
+    if (-not $script:OutputCollector) { return 0 }
+    $builder = [Text.StringBuilder]::new()
+    $lineCount = 0
+    [string]$line = $null
+    while ($lineCount -lt $MaximumLines -and $script:OutputCollector.Lines.TryDequeue([ref]$line)) {
+        $null = $builder.AppendLine($line)
+        $lineCount++
+        $line = $null
+    }
+    if ($lineCount -gt 0) {
+        $OutputTextBox.AppendText($builder.ToString())
+        $OutputTextBox.ScrollToEnd()
+    }
+    return $lineCount
+}
+
+function Get-OperationElapsedText {
+    if (-not $script:OperationStopwatch) { return '00:00:00' }
+    $elapsed = $script:OperationStopwatch.Elapsed
+    $hours = [int][math]::Floor($elapsed.TotalHours)
+    return '{0:00}:{1:00}:{2:00}' -f $hours, $elapsed.Minutes, $elapsed.Seconds
+}
+
 function Clear-OperationResult {
     $OperationResultTextBlock.Text = ''
     $OperationResultBorder.Visibility = 'Collapsed'
@@ -658,7 +701,13 @@ function Set-UiRunningState {
     $PreviewButton.IsEnabled = -not $Running
     $CopyButton.IsEnabled = -not $Running
     $CancelButton.IsEnabled = $Running
-    $StatusIndicator.Fill = if ($Running) { '#F59E0B' } else { '#22C55E' }
+    $CancelButton.Content = if ($Running) { 'Cancel operation' } else { 'Cancel' }
+    $ActivityProgressBar.Visibility = if ($Running) { 'Visible' } else { 'Collapsed' }
+    $ElapsedTextBlock.Visibility = if ($Running) { 'Visible' } else { 'Collapsed' }
+    if (-not $Running) {
+        $ElapsedTextBlock.Text = ''
+    }
+    $StatusIndicator.Fill = '#22C55E'
 }
 
 function Remove-ProcessOutputCollector {
@@ -666,6 +715,43 @@ function Remove-ProcessOutputCollector {
         $script:OutputCollector.Dispose()
         $script:OutputCollector = $null
     }
+}
+
+function Complete-CopyOperation {
+    param(
+        [Parameter(Mandatory)] [int]$ExitCode,
+        [Parameter(Mandatory)] [string]$Elapsed
+    )
+
+    $wasCancelled = $script:CancelRequested
+    Remove-ProcessOutputCollector
+    $script:ActiveProcess.Dispose()
+    $script:ActiveProcess = $null
+    $script:OperationStopwatch = $null
+    $script:PendingExitCode = $null
+    $script:OperationElapsed = $null
+    Set-UiRunningState $false
+
+    if ($wasCancelled) {
+        Add-OutputLine
+        Add-OutputLine "Operation cancelled after $Elapsed."
+        $StatusTextBlock.Text = "Cancelled after $Elapsed"
+        $StatusIndicator.Fill = '#EF4444'
+        Set-OperationResult -Result Failed -Detail "Operation cancelled after $Elapsed."
+    }
+    elseif ($ExitCode -eq 0) {
+        $StatusTextBlock.Text = "Completed successfully in $Elapsed"
+        $StatusIndicator.Fill = '#22C55E'
+        Set-OperationResult -Result Success -Detail "Operation completed successfully in $Elapsed."
+    }
+    else {
+        Add-OutputLine
+        Add-OutputLine "CopyFromTo exited with status $ExitCode after $Elapsed. Review the output above."
+        $StatusTextBlock.Text = "Finished with errors after $Elapsed (exit $ExitCode)"
+        $StatusIndicator.Fill = '#EF4444'
+        Set-OperationResult -Result Failed -Detail "CopyFromTo exited with status $ExitCode after $Elapsed."
+    }
+    $script:CancelRequested = $false
 }
 
 function Select-Folder {
@@ -834,9 +920,13 @@ function Start-CopyOperation {
         $script:ActiveProcess = $process
         $script:OutputCollector = $collector
         $script:CancelRequested = $false
+        $script:PendingExitCode = $null
+        $script:OperationElapsed = $null
+        $script:OperationStopwatch = [Diagnostics.Stopwatch]::StartNew()
         $process.BeginOutputReadLine()
         $process.BeginErrorReadLine()
         Set-UiRunningState $true
+        $ElapsedTextBlock.Text = 'Elapsed 00:00:00'
         $StatusTextBlock.Text = if ($Preview) { 'Building preview…' } else { 'Copy in progress…' }
     }
     catch {
@@ -879,8 +969,15 @@ $CancelButton.Add_Click({
     if ($script:ActiveProcess -and -not $script:ActiveProcess.HasExited) {
         $script:CancelRequested = $true
         $StatusTextBlock.Text = 'Cancelling…'
+        $CancelButton.Content = 'Cancelling…'
+        $CancelButton.IsEnabled = $false
+        Add-OutputLine
+        Add-OutputLine 'Cancellation requested…'
         try {
             & taskkill.exe /PID $script:ActiveProcess.Id /T /F 2>$null | Out-Null
+            if ($LASTEXITCODE -ne 0 -and -not $script:ActiveProcess.HasExited) {
+                $script:ActiveProcess.Kill()
+            }
         }
         catch {
             try { $script:ActiveProcess.Kill() } catch { }
@@ -891,42 +988,31 @@ $CancelButton.Add_Click({
 $timer = [Windows.Threading.DispatcherTimer]::new()
 $timer.Interval = [TimeSpan]::FromMilliseconds(120)
 $timer.Add_Tick({
-    [string]$line = $null
-    while ($script:OutputCollector -and $script:OutputCollector.Lines.TryDequeue([ref]$line)) {
-        Add-OutputLine $line
-        $line = $null
-    }
-    if ($script:ActiveProcess -and $script:ActiveProcess.HasExited) {
+    $null = Write-ProcessOutputBatch
+    if (-not $script:ActiveProcess) { return }
+
+    if ($null -eq $script:PendingExitCode -and $script:ActiveProcess.HasExited) {
+        # WaitForExit after HasExited returns promptly and guarantees asynchronous
+        # stdout/stderr callbacks have finished enqueueing their final lines.
         $script:ActiveProcess.WaitForExit()
-        while ($script:OutputCollector -and $script:OutputCollector.Lines.TryDequeue([ref]$line)) {
-            Add-OutputLine $line
-            $line = $null
-        }
-        $exitCode = $script:ActiveProcess.ExitCode
-        Remove-ProcessOutputCollector
-        $script:ActiveProcess.Dispose()
-        $script:ActiveProcess = $null
-        Set-UiRunningState $false
-        if ($script:CancelRequested) {
-            Add-OutputLine
-            Add-OutputLine 'Operation cancelled.'
-            $StatusTextBlock.Text = 'Cancelled'
-            $StatusIndicator.Fill = '#EF4444'
-            Set-OperationResult -Result Failed -Detail 'Operation cancelled.'
-        }
-        elseif ($exitCode -eq 0) {
-            $StatusTextBlock.Text = 'Completed successfully'
-            $StatusIndicator.Fill = '#22C55E'
-            Set-OperationResult -Result Success -Detail 'Operation completed successfully.'
-        }
-        else {
-            Add-OutputLine
-            Add-OutputLine "CopyFromTo exited with status $exitCode. Review the output above."
-            $StatusTextBlock.Text = "Finished with errors (exit $exitCode)"
-            $StatusIndicator.Fill = '#EF4444'
-            Set-OperationResult -Result Failed -Detail "CopyFromTo exited with status $exitCode."
-        }
+        $script:PendingExitCode = $script:ActiveProcess.ExitCode
+        if ($script:OperationStopwatch) { $script:OperationStopwatch.Stop() }
+        $script:OperationElapsed = Get-OperationElapsedText
+        $StatusTextBlock.Text = 'Finalizing output…'
+        $CancelButton.Content = 'Finishing…'
+        $CancelButton.IsEnabled = $false
     }
+
+    if ($null -ne $script:PendingExitCode) {
+        $null = Write-ProcessOutputBatch -MaximumLines 400
+        $outputDrained = -not $script:OutputCollector -or $script:OutputCollector.Lines.IsEmpty
+        if ($outputDrained) {
+            Complete-CopyOperation -ExitCode $script:PendingExitCode -Elapsed $script:OperationElapsed
+        }
+        return
+    }
+
+    $ElapsedTextBlock.Text = "Elapsed $(Get-OperationElapsedText)"
 })
 $timer.Start()
 Set-UiTheme 'Light'

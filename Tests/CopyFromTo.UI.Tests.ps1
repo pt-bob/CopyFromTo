@@ -25,11 +25,12 @@ Describe 'CopyFromTo desktop UI' {
         $output | Should -Match 'Themes=Light,Dark'
         $output | Should -Match 'DarkContrast=True'
         $output | Should -Match 'DateFilters=True'
+        $output | Should -Match 'ActivityIndicator=True'
         $output | Should -Match 'OutputLayout=True'
         $output | Should -Match 'RenderMode=SoftwareOnly'
         $output | Should -Match 'IsolatedHost=True'
         $output | Should -Match 'OutputCapture=True'
-        $output | Should -Match 'Controls=30'
+        $output | Should -Match 'Controls=32'
     }
 
     It 'shows a green SUCCESS or red FAILED banner after an operation' {
@@ -58,6 +59,27 @@ Describe 'CopyFromTo desktop UI' {
         $uiText | Should -Not -Match 'SelectedDate\.Value'
         $uiText | Should -Match "SelectedDate\.ToString\('yyyy-MM-dd'\)"
         $uiText | Should -Match 'SelectedDate\.Date'
+    }
+
+    It 'keeps long operations visibly active and output rendering bounded' {
+        $uiText = Get-Content -LiteralPath $script:UiPath -Raw
+
+        $uiText | Should -Match 'ActivityProgressBar.+IsIndeterminate="True"'
+        $uiText | Should -Match 'Foreground="#22C55E"'
+        $uiText | Should -Match 'ElapsedTextBlock'
+        $uiText | Should -Match 'Diagnostics\.Stopwatch\]::StartNew\(\)'
+        $uiText | Should -Match 'function Write-ProcessOutputBatch'
+        $uiText | Should -Match '\[int\]\$MaximumLines = 200'
+        $uiText | Should -Match 'Write-ProcessOutputBatch -MaximumLines 400'
+    }
+
+    It 'cancels the child process tree and restores the controls after completion' {
+        $uiText = Get-Content -LiteralPath $script:UiPath -Raw
+
+        $uiText | Should -Match 'taskkill\.exe /PID \$script:ActiveProcess\.Id /T /F'
+        $uiText | Should -Match '\$CancelButton\.Content = ''Cancelling'
+        $uiText | Should -Match 'Complete-CopyOperation'
+        $uiText | Should -Match 'Set-UiRunningState \$false'
     }
 
     It 'provides command-line help without opening the window' {
