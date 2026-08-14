@@ -84,6 +84,23 @@ Invoke-Pester -Path .\Tests -Output Detailed
 The suite invokes the copy engine and UI validation as child processes and includes
 Windows PowerShell 5.1 compatibility coverage when available.
 
+## File-size report by date range
+
+`TotalFileSize-of-DateRange.ps1` is a separate reporting utility that totals files by
+date without copying them. It uses each file's last-modified date by default, includes
+the complete ending day, and supports local folders and UNC paths:
+
+```powershell
+.\TotalFileSize-of-DateRange.ps1 `
+    -FolderPath '\\Server\Share\Archive' `
+    -StartDate '2026-01-01' -EndDate '2026-06-30' -Recurse
+```
+
+Use `-DateProperty CreationTime` when creation date is specifically needed, `-Force`
+to include hidden files, or `-PassThru` to return a structured object for another
+PowerShell command. Recursive scans stop with an error if a folder cannot be read, so
+the script never silently reports an incomplete total.
+
 ## Build a Windows executable
 
 `Build-Executable.ps1` creates a standalone 64-bit Windows GUI executable using PS2EXE:
