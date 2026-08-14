@@ -21,7 +21,10 @@ The desktop interface provides:
 - fast metadata or thorough SHA-256 verification;
 - advanced Robocopy retry, wait, thread, timestamp, and preview settings;
 - a safe preview that makes no destination changes;
-- live operation output, completion status, and cancellation.
+- live operation output and clear completion status;
+- a green activity bar with elapsed time during long previews and copies;
+- responsive, bounded output rendering for very large file groups;
+- cancellation that stops the background process tree and returns to the main UI;
 - coordinated light and dark color modes, including the operation output panel.
 
 The UI asks for confirmation before a real copy. It then starts `CopyFromTo.ps1` in a
