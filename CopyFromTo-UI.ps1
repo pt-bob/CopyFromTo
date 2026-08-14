@@ -32,6 +32,7 @@ $ErrorActionPreference = 'Stop'
 # Build-Executable.ps1 changes this exact assignment to $true only in its
 # temporary compilation source. The checked-in script always remains in source mode.
 $script:IsPackagedExecutable = $false
+$script:ApplicationVersion = '1.1.0.0'
 $script:EmbeddedEngineBase64 = '__COPYFROMTO_ENGINE_BASE64__'
 $script:EmbeddedEngineSha256 = '__COPYFROMTO_ENGINE_SHA256__'
 $script:RuntimeEngineFolder = $null
@@ -195,7 +196,7 @@ if (-not $ValidateOnly -and [Threading.Thread]::CurrentThread.ApartmentState -ne
 [xml]$xaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="CopyFromTo (Picnic Time)" Width="1120" Height="780" MinWidth="940" MinHeight="650"
+        Title="CopyFromTo" Width="1120" Height="780" MinWidth="940" MinHeight="650"
         WindowStartupLocation="CenterScreen" Background="{DynamicResource AppBackgroundBrush}" FontFamily="Segoe UI"
         TextOptions.TextFormattingMode="Display">
     <Window.Resources>
@@ -389,19 +390,43 @@ if (-not $ValidateOnly -and [Threading.Thread]::CurrentThread.ApartmentState -ne
 
             <Border Grid.Column="2" Background="{DynamicResource OutputHeaderBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="8">
                 <Grid Margin="0">
-                    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                     <Grid Grid.Row="0" Margin="16,12">
                         <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                         <TextBlock Text="Operation output" Foreground="{DynamicResource TextBrush}" FontWeight="SemiBold" FontSize="15" />
                         <Button x:Name="ClearOutputButton" Grid.Column="1" Content="Clear" Foreground="{DynamicResource MutedTextBrush}" Background="Transparent" BorderThickness="0" Cursor="Hand" />
                     </Grid>
-                    <TextBox x:Name="OutputTextBox" Grid.Row="1" IsReadOnly="True" AcceptsReturn="True"
+                    <Border x:Name="PreviewSummaryBorder" Grid.Row="1" Visibility="Collapsed"
+                            Margin="12,0,12,12" Padding="16,13" CornerRadius="7"
+                            Background="{DynamicResource BadgeBackgroundBrush}"
+                            BorderBrush="{StaticResource AccentBrush}" BorderThickness="1">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel>
+                                <TextBlock Text="PREVIEW SUMMARY" Foreground="{DynamicResource BadgeTextBrush}"
+                                           FontSize="11" FontWeight="Bold" />
+                                <TextBlock x:Name="PreviewSummaryCountTextBlock" Text="0 files"
+                                           Foreground="{DynamicResource HeadingBrush}" FontSize="21"
+                                           FontWeight="Bold" Margin="0,2,0,0" />
+                                <TextBlock x:Name="PreviewSummaryDetailTextBlock"
+                                           Text="Exact match from the latest completed preview"
+                                           Foreground="{DynamicResource MutedTextBrush}" FontSize="11" Margin="0,3,0,0" />
+                            </StackPanel>
+                            <TextBlock x:Name="PreviewSummarySizeTextBlock" Grid.Column="1" Text="0 bytes"
+                                       Foreground="{DynamicResource BadgeTextBrush}" FontSize="21"
+                                       FontWeight="Bold" VerticalAlignment="Center" Margin="18,0,0,0" />
+                        </Grid>
+                    </Border>
+                    <TextBox x:Name="OutputTextBox" Grid.Row="2" IsReadOnly="True" AcceptsReturn="True"
                              VerticalAlignment="Stretch" HorizontalAlignment="Stretch"
                              VerticalContentAlignment="Top" HorizontalContentAlignment="Left"
                              VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto"
                              TextWrapping="NoWrap" FontFamily="Consolas" FontSize="12" Background="{DynamicResource OutputBackgroundBrush}"
                              Foreground="{DynamicResource OutputTextBrush}" BorderThickness="0" Padding="14" />
-                    <Border x:Name="OperationResultBorder" Grid.Row="2" Visibility="Collapsed"
+                    <Border x:Name="OperationResultBorder" Grid.Row="3" Visibility="Collapsed"
                             Padding="14,11" CornerRadius="0,0,7,7">
                         <TextBlock x:Name="OperationResultTextBlock" Foreground="White" FontSize="18"
                                    FontWeight="Bold" TextAlignment="Center" />
@@ -424,7 +449,7 @@ if (-not $ValidateOnly -and [Threading.Thread]::CurrentThread.ApartmentState -ne
                              Foreground="#22C55E" Background="{DynamicResource BorderBrush}" BorderThickness="0" />
             </StackPanel>
             <StackPanel Grid.Column="1" Orientation="Horizontal">
-                <Button x:Name="CancelButton" Content="Cancel" Style="{StaticResource SecondaryButton}" Width="118" Margin="0,0,8,0" IsEnabled="False" />
+                <Button x:Name="CancelButton" Content="Cancel" Style="{StaticResource SecondaryButton}" Width="138" Margin="0,0,8,0" IsEnabled="False" />
                 <Button x:Name="PreviewButton" Content="Preview" Style="{StaticResource SecondaryButton}" Width="92" Margin="0,0,8,0" />
                 <Button x:Name="CopyButton" Content="Copy files" Style="{StaticResource PrimaryButton}" Width="112" />
             </StackPanel>
@@ -436,6 +461,9 @@ if (-not $ValidateOnly -and [Threading.Thread]::CurrentThread.ApartmentState -ne
 try {
     $reader = [System.Xml.XmlNodeReader]::new($xaml)
     $window = [Windows.Markup.XamlReader]::Load($reader)
+    $parsedApplicationVersion = [version]$script:ApplicationVersion
+    $window.Title = 'CopyFromTo v{0}.{1} (Picnic Time)' -f `
+        $parsedApplicationVersion.Major, $parsedApplicationVersion.Minor
 }
 catch {
     Write-Error "The CopyFromTo UI definition is invalid. $($_.Exception.Message)"
@@ -450,6 +478,8 @@ $requiredControls = @(
     'LogFolderTextBox', 'BrowseSourceButton', 'BrowseDestinationButton', 'BrowseLogButton',
     'ThemeToggleButton',
     'PreviewButton', 'CopyButton', 'CancelButton', 'ClearOutputButton', 'OutputTextBox',
+    'PreviewSummaryBorder', 'PreviewSummaryCountTextBlock', 'PreviewSummarySizeTextBlock',
+    'PreviewSummaryDetailTextBlock',
     'OperationResultBorder', 'OperationResultTextBlock',
     'StatusTextBlock', 'StatusIndicator', 'ElapsedTextBlock', 'ActivityProgressBar'
 )
@@ -469,6 +499,8 @@ $script:OperationStopwatch = $null
 $script:PendingExitCode = $null
 $script:OperationElapsed = $null
 $script:OutputCollector = $null
+$script:PreviewSummaryPath = $null
+$script:ActiveOperationIsPreview = $false
 $script:PowerShellExe = if ($script:IsPackagedExecutable) {
     Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
 }
@@ -564,6 +596,11 @@ if ($ValidateOnly) {
         $ElapsedTextBlock.Visibility -ne 'Collapsed') {
         throw 'Operation activity indicator validation failed.'
     }
+    if ($PreviewSummaryBorder.Visibility -ne 'Collapsed' -or
+        $PreviewSummaryCountTextBlock.Text -ne '0 files' -or
+        $PreviewSummarySizeTextBlock.Text -ne '0 bytes') {
+        throw 'Preview summary initial-state validation failed.'
+    }
 
     $OutputTextBox.Text = 'output-visibility-probe'
     $window.ShowActivated = $false
@@ -612,7 +649,7 @@ if ($ValidateOnly) {
         $captureCollector.Dispose()
         $captureProcess.Dispose()
     }
-    Write-Output "CopyFromTo UI validation passed. Title='$($window.Title)'; Themes=Light,Dark; DarkContrast=True; DateFilters=True; ActivityIndicator=True; OutputLayout=True; RenderMode=$([Windows.Media.RenderOptions]::ProcessRenderMode); IsolatedHost=True; Packaged=$script:IsPackagedExecutable; OutputCapture=True; Engine='$script:EnginePath'; Controls=$($requiredControls.Count)."
+    Write-Output "CopyFromTo UI validation passed. Title='$($window.Title)'; Themes=Light,Dark; DarkContrast=True; DateFilters=True; ActivityIndicator=True; PreviewSummary=True; OutputLayout=True; RenderMode=$([Windows.Media.RenderOptions]::ProcessRenderMode); IsolatedHost=True; Packaged=$script:IsPackagedExecutable; OutputCapture=True; Engine='$script:EnginePath'; Controls=$($requiredControls.Count)."
     Remove-RuntimeEngine
     exit 0
 }
@@ -647,6 +684,55 @@ function Add-OutputLine {
     param([string]$Text = '')
     $OutputTextBox.AppendText($Text + [Environment]::NewLine)
     $OutputTextBox.ScrollToEnd()
+}
+
+function Remove-PreviewSummaryFile {
+    if ($script:PreviewSummaryPath -and
+        (Test-Path -LiteralPath $script:PreviewSummaryPath -PathType Leaf)) {
+        Remove-Item -LiteralPath $script:PreviewSummaryPath -Force -ErrorAction SilentlyContinue
+    }
+    $script:PreviewSummaryPath = $null
+}
+
+function Clear-PreviewSummary {
+    $PreviewSummaryBorder.Visibility = 'Collapsed'
+    $PreviewSummaryCountTextBlock.Text = '0 files'
+    $PreviewSummarySizeTextBlock.Text = '0 bytes'
+    $PreviewSummaryDetailTextBlock.Text = 'Exact match from the latest completed preview'
+}
+
+function Format-PreviewByteSize {
+    param([Parameter(Mandatory)] [long]$Bytes)
+
+    if ($Bytes -ge 1TB) { return '{0:N2} TB' -f ($Bytes / 1TB) }
+    if ($Bytes -ge 1GB) { return '{0:N2} GB' -f ($Bytes / 1GB) }
+    if ($Bytes -ge 1MB) { return '{0:N2} MB' -f ($Bytes / 1MB) }
+    if ($Bytes -ge 1KB) { return '{0:N2} KB' -f ($Bytes / 1KB) }
+    return '{0:N0} bytes' -f $Bytes
+}
+
+function Show-PreviewSummary {
+    param([Parameter(Mandatory)] [string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw 'The preview completed without producing its summary file.'
+    }
+
+    $summary = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    if ($null -eq $summary.MatchedFiles -or $null -eq $summary.TotalBytes) {
+        throw 'The preview summary did not contain its required values.'
+    }
+    [long]$matchedFiles = $summary.MatchedFiles
+    [long]$totalBytes = $summary.TotalBytes
+    if ([int]$summary.SchemaVersion -ne 1 -or $matchedFiles -lt 0 -or $totalBytes -lt 0) {
+        throw 'The preview summary contained invalid values.'
+    }
+
+    $fileLabel = if ($matchedFiles -eq 1) { 'file' } else { 'files' }
+    $PreviewSummaryCountTextBlock.Text = '{0:N0} {1}' -f $matchedFiles, $fileLabel
+    $PreviewSummarySizeTextBlock.Text = Format-PreviewByteSize -Bytes $totalBytes
+    $PreviewSummaryDetailTextBlock.Text = '{0:N0} exact bytes from the latest completed preview' -f $totalBytes
+    $PreviewSummaryBorder.Visibility = 'Visible'
 }
 
 function Write-ProcessOutputBatch {
@@ -724,12 +810,15 @@ function Complete-CopyOperation {
     )
 
     $wasCancelled = $script:CancelRequested
+    $wasPreview = $script:ActiveOperationIsPreview
+    $previewSummaryPath = $script:PreviewSummaryPath
     Remove-ProcessOutputCollector
     $script:ActiveProcess.Dispose()
     $script:ActiveProcess = $null
     $script:OperationStopwatch = $null
     $script:PendingExitCode = $null
     $script:OperationElapsed = $null
+    $script:ActiveOperationIsPreview = $false
     Set-UiRunningState $false
 
     if ($wasCancelled) {
@@ -740,9 +829,25 @@ function Complete-CopyOperation {
         Set-OperationResult -Result Failed -Detail "Operation cancelled after $Elapsed."
     }
     elseif ($ExitCode -eq 0) {
+        if ($wasPreview) {
+            try {
+                Show-PreviewSummary -Path $previewSummaryPath
+            }
+            catch {
+                Clear-PreviewSummary
+                Add-OutputLine
+                Add-OutputLine "Preview summary unavailable: $($_.Exception.Message)"
+            }
+        }
         $StatusTextBlock.Text = "Completed successfully in $Elapsed"
         $StatusIndicator.Fill = '#22C55E'
-        Set-OperationResult -Result Success -Detail "Operation completed successfully in $Elapsed."
+        $successDetail = if ($wasPreview) {
+            "Preview completed successfully in $Elapsed."
+        }
+        else {
+            "Operation completed successfully in $Elapsed."
+        }
+        Set-OperationResult -Result Success -Detail $successDetail
     }
     else {
         Add-OutputLine
@@ -751,6 +856,7 @@ function Complete-CopyOperation {
         $StatusIndicator.Fill = '#EF4444'
         Set-OperationResult -Result Failed -Detail "CopyFromTo exited with status $ExitCode after $Elapsed."
     }
+    Remove-PreviewSummaryFile
     $script:CancelRequested = $false
 }
 
@@ -871,6 +977,14 @@ function Start-CopyOperation {
         return
     }
 
+    $previewSummaryPath = $null
+    if ($Preview) {
+        Clear-PreviewSummary
+        $previewSummaryPath = Join-Path ([IO.Path]::GetTempPath()) `
+            ("CopyFromTo-preview-{0}.json" -f [guid]::NewGuid().ToString('N'))
+        $arguments = @($arguments) + @('-PreviewSummaryPath', $previewSummaryPath)
+    }
+
     if (-not $Preview) {
         $source = $SourceTextBox.Text.Trim()
         $destination = $DestinationTextBox.Text.Trim()
@@ -919,6 +1033,8 @@ function Start-CopyOperation {
         if (-not $process.Start()) { throw 'PowerShell did not start the copy process.' }
         $script:ActiveProcess = $process
         $script:OutputCollector = $collector
+        $script:PreviewSummaryPath = $previewSummaryPath
+        $script:ActiveOperationIsPreview = [bool]$Preview
         $script:CancelRequested = $false
         $script:PendingExitCode = $null
         $script:OperationElapsed = $null
@@ -932,18 +1048,43 @@ function Start-CopyOperation {
     catch {
         $collector.Dispose()
         $process.Dispose()
+        if ($previewSummaryPath -and (Test-Path -LiteralPath $previewSummaryPath -PathType Leaf)) {
+            Remove-Item -LiteralPath $previewSummaryPath -Force -ErrorAction SilentlyContinue
+        }
+        $script:PreviewSummaryPath = $null
+        $script:ActiveOperationIsPreview = $false
         Set-OperationResult -Result Failed -Detail 'The copy process could not be started.'
         [Windows.MessageBox]::Show("Could not start CopyFromTo.ps1. $($_.Exception.Message)", 'Launch failed', 'OK', 'Error') | Out-Null
     }
 }
 
-$UseStartDateCheckBox.Add_Checked({ $StartDatePicker.IsEnabled = $true })
-$UseStartDateCheckBox.Add_Unchecked({ $StartDatePicker.IsEnabled = $false })
-$UseEndDateCheckBox.Add_Checked({ $EndDatePicker.IsEnabled = $true })
-$UseEndDateCheckBox.Add_Unchecked({ $EndDatePicker.IsEnabled = $false })
+$UseStartDateCheckBox.Add_Checked({
+    $StartDatePicker.IsEnabled = $true
+    Clear-PreviewSummary
+})
+$UseStartDateCheckBox.Add_Unchecked({
+    $StartDatePicker.IsEnabled = $false
+    Clear-PreviewSummary
+})
+$UseEndDateCheckBox.Add_Checked({
+    $EndDatePicker.IsEnabled = $true
+    Clear-PreviewSummary
+})
+$UseEndDateCheckBox.Add_Unchecked({
+    $EndDatePicker.IsEnabled = $false
+    Clear-PreviewSummary
+})
+$StartDatePicker.Add_SelectedDateChanged({ Clear-PreviewSummary })
+$EndDatePicker.Add_SelectedDateChanged({ Clear-PreviewSummary })
+$SourceTextBox.Add_TextChanged({ Clear-PreviewSummary })
+$FileNameTextBox.Add_TextChanged({ Clear-PreviewSummary })
+$RecurseCheckBox.Add_Checked({ Clear-PreviewSummary })
+$RecurseCheckBox.Add_Unchecked({ Clear-PreviewSummary })
 $FollowLinksCheckBox.Add_Checked({
     if (-not $RecurseCheckBox.IsChecked) { $RecurseCheckBox.IsChecked = $true }
+    Clear-PreviewSummary
 })
+$FollowLinksCheckBox.Add_Unchecked({ Clear-PreviewSummary })
 $BrowseSourceButton.Add_Click({
     $selected = Select-Folder $SourceTextBox.Text.Trim()
     if ($selected) { $SourceTextBox.Text = $selected }
@@ -1028,6 +1169,7 @@ $window.Add_Closing({
         try { & taskkill.exe /PID $script:ActiveProcess.Id /T /F 2>$null | Out-Null } catch { }
     }
     Remove-ProcessOutputCollector
+    Remove-PreviewSummaryFile
     $timer.Stop()
 })
 

@@ -16,7 +16,8 @@
     Optional .ico file to embed as the application icon.
 
 .PARAMETER Version
-    Four-part Windows file version. Defaults to 1.0.0.0.
+    Four-part Windows file version. Defaults to 1.1.0.0. The executable title bar
+    displays its major and minor components.
 
 .PARAMETER InstallDependency
     Installs the required PS2EXE version from PowerShell Gallery for the current user if
@@ -43,7 +44,7 @@ param(
     [string]$IconPath,
 
     [ValidatePattern('^\d+\.\d+\.\d+\.\d+$')]
-    [string]$Version = '1.0.0.0',
+    [string]$Version = '1.1.0.0',
 
     [switch]$InstallDependency,
 
@@ -104,9 +105,11 @@ $engineBase64 = [Convert]::ToBase64String($engineBytes)
 $engineSha256 = (Get-FileHash -LiteralPath $enginePath -Algorithm SHA256).Hash
 $uiSource = [IO.File]::ReadAllText($uiPath)
 $packagedModeTokenLine = '$script:IsPackagedExecutable = $false'
+$applicationVersionTokenLine = '$script:ApplicationVersion = ''1.1.0.0'''
 $base64TokenLine = '$script:EmbeddedEngineBase64 = ''__COPYFROMTO_ENGINE_BASE64__'''
 $hashTokenLine = '$script:EmbeddedEngineSha256 = ''__COPYFROMTO_ENGINE_SHA256__'''
 if (($uiSource.Split([string[]]@($packagedModeTokenLine), [StringSplitOptions]::None).Count - 1) -ne 1 -or
+    ($uiSource.Split([string[]]@($applicationVersionTokenLine), [StringSplitOptions]::None).Count - 1) -ne 1 -or
     ($uiSource.Split([string[]]@($base64TokenLine), [StringSplitOptions]::None).Count - 1) -ne 1 -or
     ($uiSource.Split([string[]]@($hashTokenLine), [StringSplitOptions]::None).Count - 1) -ne 1) {
     throw 'The UI packaging markers are missing or duplicated.'
@@ -114,6 +117,9 @@ if (($uiSource.Split([string[]]@($packagedModeTokenLine), [StringSplitOptions]::
 $packagedUiSource = $uiSource.Replace(
     $packagedModeTokenLine,
     '$script:IsPackagedExecutable = $true'
+).Replace(
+    $applicationVersionTokenLine,
+    "`$script:ApplicationVersion = '$Version'"
 ).Replace(
     $base64TokenLine,
     "`$script:EmbeddedEngineBase64 = '$engineBase64'"
@@ -127,6 +133,8 @@ $stagedUiPath = Join-Path $stagingDirectory 'CopyFromTo-UI.Standalone.ps1'
 New-Item -ItemType Directory -Path $stagingDirectory -Force | Out-Null
 [IO.File]::WriteAllText($stagedUiPath, $packagedUiSource, [Text.UTF8Encoding]::new($false))
 
+$parsedBuildVersion = [version]$Version
+$displayVersion = '{0}.{1}' -f $parsedBuildVersion.Major, $parsedBuildVersion.Minor
 $compileParameters = @{
     InputFile   = $stagedUiPath
     OutputFile  = $OutputPath
@@ -136,7 +144,7 @@ $compileParameters = @{
     NoConfigFile = $true
     DPIAware    = $true
     SupportOS   = $true
-    Title       = 'CopyFromTo (Picnic Time)'
+    Title       = "CopyFromTo v$displayVersion (Picnic Time)"
     Description = 'Desktop interface for safe, verified file copying'
     Company     = 'Picnic Time'
     Product     = 'CopyFromTo'
