@@ -24,6 +24,7 @@ Describe 'CopyFromTo desktop UI' {
         $output | Should -Match "Title='CopyFromTo \(Picnic Time\)'"
         $output | Should -Match 'Themes=Light,Dark'
         $output | Should -Match 'DarkContrast=True'
+        $output | Should -Match 'DateFilters=True'
         $output | Should -Match 'OutputLayout=True'
         $output | Should -Match 'RenderMode=SoftwareOnly'
         $output | Should -Match 'IsolatedHost=True'
@@ -49,6 +50,14 @@ Describe 'CopyFromTo desktop UI' {
         $uiText | Should -Match 'Create the folder and start copying\?'
         $uiText | Should -Match "'Create destination folder\?', 'YesNo', 'Warning'"
         $uiText | Should -Match 'if \(\$confirmation -ne ''Yes''\) \{ return \}'
+    }
+
+    It 'uses PowerShell-compatible WPF date values when building arguments' {
+        $uiText = Get-Content -LiteralPath $script:UiPath -Raw
+
+        $uiText | Should -Not -Match 'SelectedDate\.Value'
+        $uiText | Should -Match "SelectedDate\.ToString\('yyyy-MM-dd'\)"
+        $uiText | Should -Match 'SelectedDate\.Date'
     }
 
     It 'provides command-line help without opening the window' {

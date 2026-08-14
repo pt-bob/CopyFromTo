@@ -535,6 +535,19 @@ if ($ValidateOnly) {
     Set-UiTheme 'Light'
     if ($ThemeToggleButton.Content -ne 'Dark Mode') { throw 'Light theme validation failed.' }
 
+    # PowerShell unwraps WPF's Nullable[datetime] SelectedDate property into a plain
+    # DateTime. Exercise the same access pattern used to build operation arguments so
+    # Windows PowerShell 5.1 catches regressions such as calling a nonexistent .Value.
+    $StartDatePicker.SelectedDate = [datetime]'2025-01-01'
+    $EndDatePicker.SelectedDate = [datetime]'2025-06-30'
+    if ($StartDatePicker.SelectedDate.ToString('yyyy-MM-dd') -ne '2025-01-01' -or
+        $EndDatePicker.SelectedDate.ToString('yyyy-MM-dd') -ne '2025-06-30' -or
+        $StartDatePicker.SelectedDate.Date -gt $EndDatePicker.SelectedDate.Date) {
+        throw 'Date filter validation failed.'
+    }
+    $StartDatePicker.SelectedDate = $null
+    $EndDatePicker.SelectedDate = $null
+
     $OutputTextBox.Text = 'output-visibility-probe'
     $window.ShowActivated = $false
     $window.ShowInTaskbar = $false
@@ -582,7 +595,7 @@ if ($ValidateOnly) {
         $captureCollector.Dispose()
         $captureProcess.Dispose()
     }
-    Write-Output "CopyFromTo UI validation passed. Title='$($window.Title)'; Themes=Light,Dark; DarkContrast=True; OutputLayout=True; RenderMode=$([Windows.Media.RenderOptions]::ProcessRenderMode); IsolatedHost=True; Packaged=$script:IsPackagedExecutable; OutputCapture=True; Engine='$script:EnginePath'; Controls=$($requiredControls.Count)."
+    Write-Output "CopyFromTo UI validation passed. Title='$($window.Title)'; Themes=Light,Dark; DarkContrast=True; DateFilters=True; OutputLayout=True; RenderMode=$([Windows.Media.RenderOptions]::ProcessRenderMode); IsolatedHost=True; Packaged=$script:IsPackagedExecutable; OutputCapture=True; Engine='$script:EnginePath'; Controls=$($requiredControls.Count)."
     Remove-RuntimeEngine
     exit 0
 }
@@ -744,14 +757,14 @@ function Get-OperationArguments {
     ))
     if ($UseStartDateCheckBox.IsChecked) {
         if (-not $StartDatePicker.SelectedDate) { throw 'Choose a start date or clear the Start date checkbox.' }
-        $arguments.AddRange([string[]]@('-StartDate', $StartDatePicker.SelectedDate.Value.ToString('yyyy-MM-dd')))
+        $arguments.AddRange([string[]]@('-StartDate', $StartDatePicker.SelectedDate.ToString('yyyy-MM-dd')))
     }
     if ($UseEndDateCheckBox.IsChecked) {
         if (-not $EndDatePicker.SelectedDate) { throw 'Choose an end date or clear the End date checkbox.' }
-        $arguments.AddRange([string[]]@('-EndDate', $EndDatePicker.SelectedDate.Value.ToString('yyyy-MM-dd')))
+        $arguments.AddRange([string[]]@('-EndDate', $EndDatePicker.SelectedDate.ToString('yyyy-MM-dd')))
     }
     if ($UseStartDateCheckBox.IsChecked -and $UseEndDateCheckBox.IsChecked -and
-        $StartDatePicker.SelectedDate.Value.Date -gt $EndDatePicker.SelectedDate.Value.Date) {
+        $StartDatePicker.SelectedDate.Date -gt $EndDatePicker.SelectedDate.Date) {
         throw 'Start date cannot be later than end date.'
     }
     if ($RecurseCheckBox.IsChecked) { $arguments.Add('-Recurse') }
