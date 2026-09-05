@@ -15,7 +15,9 @@ Run:
 The desktop interface provides:
 
 - folder browsers for the source, destination, and optional log folder;
-- comma-separated file names and wildcard patterns;
+- a choice between filtering by name/date and picking specific files;
+- comma-separated file names and wildcard patterns (use `*` for all files);
+- a multi-select file picker for copying one file or an explicit set;
 - optional start and end dates;
 - recursive copying and explicit junction/symbolic-link following;
 - fast metadata or thorough SHA-256 verification;
@@ -59,6 +61,10 @@ The command-line script remains fully supported and unchanged in how it is invok
 # Preview only
 .\CopyFromTo.ps1 -Source 'C:\Data' -Destination 'D:\Backup' `
     -FileName '*.pdf' -Recurse -DryRun -Force
+
+# Specific files, including a path under the source
+.\CopyFromTo.ps1 -Source 'C:\Data' -Destination 'D:\Backup' `
+    -LiteralFile 'Report.pdf,2024\Invoice.xlsx' -Force
 
 # Full parameter help
 .\CopyFromTo.ps1 -Help

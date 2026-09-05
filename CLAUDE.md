@@ -5,8 +5,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this is
 
 A Windows PowerShell copy engine, `CopyFromTo.ps1`, that copies files matching a name
-pattern and a last-modified date range from one folder to another (source/destination
-can be local or a UNC network share), then verifies the copy. `CopyFromTo-UI.ps1` is a
+pattern and a last-modified date range, or an explicit file list (`-LiteralFile` /
+`-FileListPath`), from one folder to another (source/destination can be local or a UNC
+network share), then verifies the copy. `CopyFromTo-UI.ps1` is a
 separate WPF front end that launches the engine as a child process; never duplicate copy
 logic in the UI or make the engine depend on WPF. There is no module manifest. Pester
 integration tests live under `Tests\`.
@@ -16,7 +17,9 @@ Base64 representation and SHA-256 hash of the unchanged engine into a temporary 
 build input, then compiles that input with a pinned PS2EXE version. The final EXE is
 standalone. The temporary build input explicitly enables packaged mode; at runtime the
 UI materializes and verifies the engine in a unique `%TEMP%` folder, launches it with
-Windows PowerShell 5.1, and removes it when the UI closes. Keep `dist\` and generated
+Windows PowerShell 5.1 and `-ExecutionPolicy Bypass` for that child process only (so a
+Restricted host policy cannot block the extracted engine), and removes it when the UI
+closes. Keep `dist\` and generated
 ZIP packages out of version control; never commit a generated UI containing the Base64
 blob.
 
@@ -34,6 +37,9 @@ blob.
 
 # Non-interactive, with filters given up front
 .\CopyFromTo.ps1 -Source 'C:\Data' -Destination 'D:\Backup' -FileName '*.pdf' -StartDate '1/2024' -EndDate '6/2024'
+
+# Specific files (no date filter; subfolder files do not require -Recurse)
+.\CopyFromTo.ps1 -Source 'C:\Data' -Destination 'D:\Backup' -LiteralFile 'Report.pdf,2024\Invoice.xlsx' -Force
 
 # Preview only, no copying
 .\CopyFromTo.ps1 -Source 'C:\Data' -Destination 'D:\Backup' -DryRun
@@ -55,15 +61,20 @@ read-through alone.
 Single script, three phases, run top to bottom in the `try` block at the bottom of the
 file:
 
-1. **Resolve filters (PowerShell).** If `-FileName` / `-StartDate` / `-EndDate` weren't
+1. **Resolve filters (PowerShell).** If `-LiteralFile` or `-FileListPath` is supplied,
+   those paths (relative to Source or absolute and inside Source) become the transfer
+   set directly; `-FileName`, date bounds, `-Recurse`, and `-FollowReparsePoint` are
+   rejected in that mode. Otherwise, if `-FileName` / `-StartDate` / `-EndDate` weren't
    passed as parameters, prompt for them interactively (`Read-FileNamePatterns`,
    `Read-DateRange`) — unless `-Force` is set, in which case unspecified filters default
    to "all files" / "no date limit" instead of prompting. `Get-ChildItem` then computes
-   the *exact* matching file set in-process (name pattern via `-like`, date via
-   `LastWriteTime.Date`). This computed list drives the preview table, the confirmation
-   prompt, copy, and verification pass — it is the source of truth for what gets copied.
-   Recursive enumeration is explicit so directory reparse points can be skipped by
-   default rather than accidentally following a junction loop.
+   the *exact* matching file set in-process (name pattern via `-like`, with tokens that
+   contain no `*` or `?` escaped as literals; date via `LastWriteTime.Date`). This
+   computed list drives the preview table, the confirmation prompt, copy, and
+   verification pass — it is the source of truth for what gets copied. Recursive
+   enumeration is explicit so directory reparse points can be skipped by default rather
+   than accidentally following a junction loop. The UI can pin a completed preview by
+   passing the summary's relative paths back as `-FileListPath` on Copy.
 2. **Copy (Robocopy).** Matches are grouped by their actual source directory and passed
    to `robocopy.exe` as exact file names in command-line-sized batches. This is deliberate:
    passing the original wildcard/date filters allowed Robocopy to copy files that were

@@ -4,9 +4,10 @@
 
 .DESCRIPTION
     CopyFromTo-UI.ps1 is a WPF front end for the existing CopyFromTo.ps1 command-line
-    tool. It collects options, launches the CLI script in a separate PowerShell process,
-    and displays its output. All file selection, copying, logging, and verification
-    remain in CopyFromTo.ps1.
+    tool. It collects options, including either a name/date filter or an explicit file
+    list, launches the CLI script in a separate PowerShell process, and displays its
+    output. All file selection, copying, logging, and verification remain in
+    CopyFromTo.ps1.
 
 .PARAMETER ValidateOnly
     Loads and validates the UI definition without opening a window or copying files.
@@ -32,7 +33,7 @@ $ErrorActionPreference = 'Stop'
 # Build-Executable.ps1 changes this exact assignment to $true only in its
 # temporary compilation source. The checked-in script always remains in source mode.
 $script:IsPackagedExecutable = $false
-$script:ApplicationVersion = '1.1.0.0'
+$script:ApplicationVersion = '1.2.1.0'
 $script:EmbeddedEngineBase64 = '__COPYFROMTO_ENGINE_BASE64__'
 $script:EmbeddedEngineSha256 = '__COPYFROMTO_ENGINE_SHA256__'
 $script:RuntimeEngineFolder = $null
@@ -111,7 +112,8 @@ if (-not $script:IsPackagedExecutable -and -not $ValidateOnly -and -not $UiHost)
         $powerShellExe = (Get-Process -Id $PID).Path
         $quotedScriptPath = '"' + $PSCommandPath.Replace('"', '\"') + '"'
         Start-Process -FilePath $powerShellExe -WindowStyle Hidden -ArgumentList @(
-            '-NoLogo', '-NoProfile', '-STA', '-File', $quotedScriptPath, '-UiHost'
+            '-NoLogo', '-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass',
+            '-File', $quotedScriptPath, '-UiHost'
         ) -ErrorAction Stop
         exit 0
     }
@@ -125,7 +127,7 @@ if (-not $script:IsPackagedExecutable -and -not $ValidateOnly -and -not $UiHost)
 # Run it synchronously so its output and exit code remain available to callers/tests.
 if (-not $script:IsPackagedExecutable -and $ValidateOnly -and [Threading.Thread]::CurrentThread.ApartmentState -ne 'STA') {
     $powerShellExe = (Get-Process -Id $PID).Path
-    & $powerShellExe -NoLogo -NoProfile -STA -File $PSCommandPath -ValidateOnly -UiHost
+    & $powerShellExe -NoLogo -NoProfile -STA -ExecutionPolicy Bypass -File $PSCommandPath -ValidateOnly -UiHost
     exit $LASTEXITCODE
 }
 
@@ -140,9 +142,113 @@ try {
 using System;
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 
 namespace CopyFromToUi
 {
+    public static class FolderPicker
+    {
+        private const uint FOS_NOCHANGEDIR = 0x00000008;
+        private const uint FOS_PICKFOLDERS = 0x00000020;
+        private const uint FOS_FORCEFILESYSTEM = 0x00000040;
+        private const uint FOS_PATHMUSTEXIST = 0x00000800;
+        private const uint SIGDN_FILESYSPATH = 0x80058000;
+        private const int HRESULT_CANCELLED = unchecked((int)0x800704C7);
+
+        [ComImport]
+        [Guid("DC1C5A9C-E88A-4DDE-A5A1-60F82A20AEF7")]
+        private class FileOpenDialogRCW { }
+
+        [ComImport]
+        [Guid("43826D1E-E718-42EE-BC55-A1E261C37BFE")]
+        [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        private interface IShellItem
+        {
+            void BindToHandler(IntPtr pbc, ref Guid bhid, ref Guid riid, out IntPtr ppv);
+            void GetParent(out IShellItem ppsi);
+            void GetDisplayName(uint sigdnName, [MarshalAs(UnmanagedType.LPWStr)] out string ppszName);
+            void GetAttributes(uint sfgaoMask, out uint psfgaoAttribs);
+            void Compare(IShellItem psi, uint hint, out int piOrder);
+        }
+
+        [ComImport]
+        [Guid("42F85136-DB7E-439C-85F1-E4075D135FC8")]
+        [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        private interface IFileOpenDialog
+        {
+            [PreserveSig] int Show(IntPtr parent);
+            void SetFileTypes();
+            void SetFileTypeIndex();
+            void GetFileTypeIndex();
+            void Advise();
+            void Unadvise();
+            void SetOptions(uint fos);
+            void GetOptions(out uint pfos);
+            void SetDefaultFolder(IShellItem psi);
+            void SetFolder(IShellItem psi);
+            void GetFolder();
+            void GetCurrentSelection();
+            void SetFileName();
+            void GetFileName();
+            void SetTitle([MarshalAs(UnmanagedType.LPWStr)] string pszTitle);
+            void SetOkButtonLabel();
+            void SetFileNameLabel();
+            void GetResult(out IShellItem ppsi);
+            void AddPlace();
+            void SetDefaultExtension();
+            void Close();
+            void SetClientGuid();
+            void ClearClientData();
+            void SetFilter();
+            void GetResults();
+            void GetSelectedItems();
+        }
+
+        [DllImport("shell32.dll", CharSet = CharSet.Unicode, PreserveSig = false)]
+        private static extern void SHCreateItemFromParsingName(
+            [MarshalAs(UnmanagedType.LPWStr)] string pszPath,
+            IntPtr pbc,
+            [In] ref Guid riid,
+            [MarshalAs(UnmanagedType.Interface)] out IShellItem ppv);
+
+        public static string SelectFolder(string title, string initialPath, IntPtr owner)
+        {
+            IFileOpenDialog dialog = (IFileOpenDialog)new FileOpenDialogRCW();
+            try
+            {
+                uint options;
+                dialog.GetOptions(out options);
+                dialog.SetOptions(options | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST | FOS_NOCHANGEDIR);
+                if (!string.IsNullOrEmpty(title)) dialog.SetTitle(title);
+                if (!string.IsNullOrEmpty(initialPath))
+                {
+                    try
+                    {
+                        Guid shellItemIid = typeof(IShellItem).GUID;
+                        IShellItem folder;
+                        SHCreateItemFromParsingName(initialPath, IntPtr.Zero, ref shellItemIid, out folder);
+                        dialog.SetFolder(folder);
+                    }
+                    catch { }
+                }
+
+                int hr = dialog.Show(owner);
+                if (hr == HRESULT_CANCELLED) return null;
+                if (hr != 0) Marshal.ThrowExceptionForHR(hr);
+
+                IShellItem result;
+                dialog.GetResult(out result);
+                string path;
+                result.GetDisplayName(SIGDN_FILESYSPATH, out path);
+                return path;
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(dialog);
+            }
+        }
+    }
+
     public sealed class ProcessOutputCollector : IDisposable
     {
         private Process process;
@@ -323,23 +429,46 @@ if (-not $ValidateOnly -and [Threading.Thread]::CurrentThread.ApartmentState -ne
                             <Button x:Name="BrowseDestinationButton" Grid.Column="1" Content="Browse…" Style="{StaticResource SecondaryButton}" Margin="8,0,0,0" />
                         </Grid>
 
-                        <TextBlock Text="File names or patterns" Style="{StaticResource FieldLabel}" />
-                        <TextBox x:Name="FileNameTextBox" Text="*" ToolTip="Comma-separated patterns, for example: *.pdf,Invoice*.xlsx" />
-                        <TextBlock Text="Separate multiple patterns with commas." FontSize="11" Foreground="{DynamicResource MutedTextBrush}" Margin="1,4,0,0" />
+                        <TextBlock Text="What to copy" Style="{StaticResource FieldLabel}" />
+                        <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
+                            <RadioButton x:Name="FilterModeRadio" GroupName="CopySelectionMode" Content="Filter by name and date" IsChecked="True" Margin="0,0,16,0" />
+                            <RadioButton x:Name="SpecificFilesModeRadio" GroupName="CopySelectionMode" Content="Choose specific files" />
+                        </StackPanel>
 
-                        <Grid Margin="0,6,0,0">
-                            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="12"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                            <StackPanel>
-                                <CheckBox x:Name="UseStartDateCheckBox" Content="Start date" />
-                                <DatePicker x:Name="StartDatePicker" IsEnabled="False" />
-                            </StackPanel>
-                            <StackPanel Grid.Column="2">
-                                <CheckBox x:Name="UseEndDateCheckBox" Content="End date" />
-                                <DatePicker x:Name="EndDatePicker" IsEnabled="False" />
-                            </StackPanel>
-                        </Grid>
+                        <StackPanel x:Name="FilterModePanel">
+                            <TextBlock Text="File names or patterns" Style="{StaticResource FieldLabel}" />
+                            <TextBox x:Name="FileNameTextBox" ToolTip="Comma-separated patterns, for example: *.pdf,Invoice*.xlsx. Use * for all files." />
+                            <TextBlock Text="Separate multiple patterns with commas. Use * for all files." FontSize="11" Foreground="{DynamicResource MutedTextBrush}" Margin="1,4,0,0" />
 
-                        <WrapPanel Margin="0,12,0,2">
+                            <Grid Margin="0,6,0,0">
+                                <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="12"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                <StackPanel>
+                                    <CheckBox x:Name="UseStartDateCheckBox" Content="Start date" />
+                                    <DatePicker x:Name="StartDatePicker" IsEnabled="False" />
+                                </StackPanel>
+                                <StackPanel Grid.Column="2">
+                                    <CheckBox x:Name="UseEndDateCheckBox" Content="End date" />
+                                    <DatePicker x:Name="EndDatePicker" IsEnabled="False" />
+                                </StackPanel>
+                            </Grid>
+                        </StackPanel>
+
+                        <StackPanel x:Name="SpecificFilesPanel" Visibility="Collapsed">
+                            <TextBlock Text="Selected files" Style="{StaticResource FieldLabel}" />
+                            <ListBox x:Name="SpecificFilesListBox" MinHeight="120" MaxHeight="180"
+                                     SelectionMode="Extended"
+                                     BorderBrush="{DynamicResource BorderBrush}"
+                                     Background="{DynamicResource InputBackgroundBrush}"
+                                     Foreground="{DynamicResource TextBrush}" />
+                            <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                                <Button x:Name="AddFilesButton" Content="Add files…" Style="{StaticResource SecondaryButton}" Margin="0,0,8,0" />
+                                <Button x:Name="RemoveFilesButton" Content="Remove" Style="{StaticResource SecondaryButton}" />
+                            </StackPanel>
+                            <TextBlock Text="Files must be inside the source folder. Subfolders are kept at the destination."
+                                       FontSize="11" Foreground="{DynamicResource MutedTextBrush}" TextWrapping="Wrap" Margin="1,6,0,0" />
+                        </StackPanel>
+
+                        <WrapPanel x:Name="RecurseOptionsPanel" Margin="0,12,0,2">
                             <CheckBox x:Name="RecurseCheckBox" Content="Include subfolders" />
                             <CheckBox x:Name="FollowLinksCheckBox" Content="Follow junctions / links" />
                         </WrapPanel>
@@ -477,6 +606,8 @@ $requiredControls = @(
     'RetryWaitTextBox', 'ThreadsTextBox', 'ToleranceTextBox', 'PreviewLimitTextBox',
     'LogFolderTextBox', 'BrowseSourceButton', 'BrowseDestinationButton', 'BrowseLogButton',
     'ThemeToggleButton',
+    'FilterModeRadio', 'SpecificFilesModeRadio', 'FilterModePanel', 'SpecificFilesPanel',
+    'SpecificFilesListBox', 'AddFilesButton', 'RemoveFilesButton', 'RecurseOptionsPanel',
     'PreviewButton', 'CopyButton', 'CancelButton', 'ClearOutputButton', 'OutputTextBox',
     'PreviewSummaryBorder', 'PreviewSummaryCountTextBlock', 'PreviewSummarySizeTextBlock',
     'PreviewSummaryDetailTextBlock',
@@ -501,6 +632,11 @@ $script:OperationElapsed = $null
 $script:OutputCollector = $null
 $script:PreviewSummaryPath = $null
 $script:ActiveOperationIsPreview = $false
+$script:FileListPath = $null
+$script:SpecificFilePaths = [System.Collections.Generic.List[string]]::new()
+$script:PinnedRelativePaths = $null
+$script:PinnedMatchedCount = $null
+$script:PinnedTotalBytes = $null
 $script:PowerShellExe = if ($script:IsPackagedExecutable) {
     Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
 }
@@ -601,6 +737,13 @@ if ($ValidateOnly) {
         $PreviewSummarySizeTextBlock.Text -ne '0 bytes') {
         throw 'Preview summary initial-state validation failed.'
     }
+    if (-not $FilterModeRadio.IsChecked -or $SpecificFilesModeRadio.IsChecked -or
+        $SpecificFilesPanel.Visibility -ne 'Collapsed' -or
+        $FilterModePanel.Visibility -ne 'Visible' -or
+        $SpecificFilesListBox.Items.Count -ne 0 -or
+        -not [string]::IsNullOrWhiteSpace($FileNameTextBox.Text)) {
+        throw 'Selection-mode initial-state validation failed.'
+    }
 
     $OutputTextBox.Text = 'output-visibility-probe'
     $window.ShowActivated = $false
@@ -649,7 +792,10 @@ if ($ValidateOnly) {
         $captureCollector.Dispose()
         $captureProcess.Dispose()
     }
-    Write-Output "CopyFromTo UI validation passed. Title='$($window.Title)'; Themes=Light,Dark; DarkContrast=True; DateFilters=True; ActivityIndicator=True; PreviewSummary=True; OutputLayout=True; RenderMode=$([Windows.Media.RenderOptions]::ProcessRenderMode); IsolatedHost=True; Packaged=$script:IsPackagedExecutable; OutputCapture=True; Engine='$script:EnginePath'; Controls=$($requiredControls.Count)."
+    if (-not ('CopyFromToUi.FolderPicker' -as [type])) {
+        throw 'Explorer-style folder picker type was not loaded.'
+    }
+    Write-Output "CopyFromTo UI validation passed. Title='$($window.Title)'; Themes=Light,Dark; DarkContrast=True; DateFilters=True; SelectionMode=True; ActivityIndicator=True; PreviewSummary=True; OutputLayout=True; RenderMode=$([Windows.Media.RenderOptions]::ProcessRenderMode); IsolatedHost=True; Packaged=$script:IsPackagedExecutable; OutputCapture=True; FolderPicker=True; Engine='$script:EnginePath'; Controls=$($requiredControls.Count)."
     Remove-RuntimeEngine
     exit 0
 }
@@ -694,11 +840,22 @@ function Remove-PreviewSummaryFile {
     $script:PreviewSummaryPath = $null
 }
 
+function Remove-FileListFile {
+    if ($script:FileListPath -and
+        (Test-Path -LiteralPath $script:FileListPath -PathType Leaf)) {
+        Remove-Item -LiteralPath $script:FileListPath -Force -ErrorAction SilentlyContinue
+    }
+    $script:FileListPath = $null
+}
+
 function Clear-PreviewSummary {
     $PreviewSummaryBorder.Visibility = 'Collapsed'
     $PreviewSummaryCountTextBlock.Text = '0 files'
     $PreviewSummarySizeTextBlock.Text = '0 bytes'
     $PreviewSummaryDetailTextBlock.Text = 'Exact match from the latest completed preview'
+    $script:PinnedRelativePaths = $null
+    $script:PinnedMatchedCount = $null
+    $script:PinnedTotalBytes = $null
 }
 
 function Format-PreviewByteSize {
@@ -724,8 +881,18 @@ function Show-PreviewSummary {
     }
     [long]$matchedFiles = $summary.MatchedFiles
     [long]$totalBytes = $summary.TotalBytes
-    if ([int]$summary.SchemaVersion -ne 1 -or $matchedFiles -lt 0 -or $totalBytes -lt 0) {
+    $schemaVersion = [int]$summary.SchemaVersion
+    if ($schemaVersion -notin @(1, 2) -or $matchedFiles -lt 0 -or $totalBytes -lt 0) {
         throw 'The preview summary contained invalid values.'
+    }
+
+    $script:PinnedMatchedCount = $matchedFiles
+    $script:PinnedTotalBytes = $totalBytes
+    if ($schemaVersion -ge 2 -and $null -ne $summary.RelativePaths) {
+        $script:PinnedRelativePaths = @($summary.RelativePaths | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    }
+    else {
+        $script:PinnedRelativePaths = $null
     }
 
     $fileLabel = if ($matchedFiles -eq 1) { 'file' } else { 'files' }
@@ -851,23 +1018,60 @@ function Complete-CopyOperation {
     }
     else {
         Add-OutputLine
-        Add-OutputLine "CopyFromTo exited with status $ExitCode after $Elapsed. Review the output above."
+        $policyBlocked = $OutputTextBox.Text -match 'running scripts is disabled'
+        if ($policyBlocked) {
+            Add-OutputLine "PowerShell blocked the copy engine because script execution is disabled. Rebuild CopyFromTo.exe from this repository, or start the engine with -ExecutionPolicy Bypass."
+        }
+        else {
+            Add-OutputLine "CopyFromTo exited with status $ExitCode after $Elapsed. Review the output above."
+        }
         $StatusTextBlock.Text = "Finished with errors after $Elapsed (exit $ExitCode)"
         $StatusIndicator.Fill = '#EF4444'
-        Set-OperationResult -Result Failed -Detail "CopyFromTo exited with status $ExitCode after $Elapsed."
+        $failedDetail = if ($policyBlocked) {
+            "PowerShell script execution is disabled on this computer (exit $ExitCode)."
+        }
+        else {
+            "CopyFromTo exited with status $ExitCode after $Elapsed."
+        }
+        Set-OperationResult -Result Failed -Detail $failedDetail
     }
     Remove-PreviewSummaryFile
+    Remove-FileListFile
     $script:CancelRequested = $false
 }
 
 function Select-Folder {
-    param([string]$InitialPath)
-    $dialog = [Windows.Forms.FolderBrowserDialog]::new()
-    $dialog.Description = 'Select a folder'
-    $dialog.ShowNewFolderButton = $true
+    param(
+        [string]$InitialPath,
+        [string]$Description = 'Select a folder'
+    )
+
+    $startPath = $null
     if ($InitialPath -and (Test-Path -LiteralPath $InitialPath -PathType Container)) {
-        $dialog.SelectedPath = $InitialPath
+        $startPath = $InitialPath
     }
+
+    $owner = [IntPtr]::Zero
+    try {
+        if ($window) {
+            $owner = ([Windows.Interop.WindowInteropHelper]::new($window)).Handle
+        }
+    }
+    catch { }
+
+    if ('CopyFromToUi.FolderPicker' -as [type]) {
+        try {
+            return [CopyFromToUi.FolderPicker]::SelectFolder($Description, $startPath, $owner)
+        }
+        catch {
+            # The Explorer-style dialog is best-effort; keep the classic picker working.
+        }
+    }
+
+    $dialog = [Windows.Forms.FolderBrowserDialog]::new()
+    $dialog.Description = $Description
+    $dialog.ShowNewFolderButton = $true
+    if ($startPath) { $dialog.SelectedPath = $startPath }
     try {
         if ($dialog.ShowDialog() -eq [Windows.Forms.DialogResult]::OK) {
             return $dialog.SelectedPath
@@ -877,6 +1081,139 @@ function Select-Folder {
         $dialog.Dispose()
     }
     return $null
+}
+
+function Test-UiPathIsWithin {
+    param(
+        [Parameter(Mandatory)] [string]$Parent,
+        [Parameter(Mandatory)] [string]$Child
+    )
+    $parentFull = [IO.Path]::GetFullPath($Parent)
+    $childFull = [IO.Path]::GetFullPath($Child)
+    $root = [IO.Path]::GetPathRoot($parentFull)
+    if ($parentFull.Length -gt $root.Length) {
+        $parentFull = $parentFull.TrimEnd([char[]]@('\', '/'))
+    }
+    $prefix = $parentFull
+    if (-not $prefix.EndsWith('\')) { $prefix += '\' }
+    return $childFull.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)
+}
+
+function Get-SourceRelativePath {
+    param(
+        [Parameter(Mandatory)] [string]$Source,
+        [Parameter(Mandatory)] [string]$FullPath
+    )
+    if (-not (Test-UiPathIsWithin -Parent $Source -Child $FullPath)) {
+        return $FullPath
+    }
+    $parentFull = [IO.Path]::GetFullPath($Source)
+    $root = [IO.Path]::GetPathRoot($parentFull)
+    if ($parentFull.Length -gt $root.Length) {
+        $parentFull = $parentFull.TrimEnd([char[]]@('\', '/'))
+    }
+    return [IO.Path]::GetFullPath($FullPath).Substring($parentFull.Length).TrimStart([char[]]@('\', '/'))
+}
+
+function Get-EnteredSourcePath {
+    $source = $SourceTextBox.Text.Trim()
+    if ([string]::IsNullOrWhiteSpace($source)) { return $null }
+    try {
+        $null = [IO.Path]::GetFullPath($source)
+        return $source
+    }
+    catch {
+        return $null
+    }
+}
+
+function Sync-SpecificFilesListBox {
+    $SpecificFilesListBox.Items.Clear()
+    $source = Get-EnteredSourcePath
+    foreach ($path in @($script:SpecificFilePaths)) {
+        $display = if ($source) { Get-SourceRelativePath -Source $source -FullPath $path } else { $path }
+        $null = $SpecificFilesListBox.Items.Add($display)
+    }
+}
+
+function Set-SelectionMode {
+    $specific = [bool]$SpecificFilesModeRadio.IsChecked
+    $FilterModePanel.Visibility = if ($specific) { 'Collapsed' } else { 'Visible' }
+    $SpecificFilesPanel.Visibility = if ($specific) { 'Visible' } else { 'Collapsed' }
+    $RecurseCheckBox.IsEnabled = -not $specific
+    $FollowLinksCheckBox.IsEnabled = -not $specific
+    $AddFilesButton.IsEnabled = $specific
+    $RemoveFilesButton.IsEnabled = $specific
+    Clear-PreviewSummary
+}
+
+function Add-SpecificFilesFromDialog {
+    $source = $SourceTextBox.Text.Trim()
+    if ([string]::IsNullOrWhiteSpace($source) -or -not (Test-Path -LiteralPath $source -PathType Container)) {
+        [Windows.MessageBox]::Show(
+            'Choose an existing source folder before adding files.',
+            'Source folder required', 'OK', 'Warning'
+        ) | Out-Null
+        return
+    }
+
+    $dialog = [Windows.Forms.OpenFileDialog]::new()
+    $dialog.Title = 'Select files to copy'
+    $dialog.Multiselect = $true
+    $dialog.CheckFileExists = $true
+    $dialog.InitialDirectory = [IO.Path]::GetFullPath($source)
+    try {
+        if ($dialog.ShowDialog() -ne [Windows.Forms.DialogResult]::OK) { return }
+        $rejected = [System.Collections.Generic.List[string]]::new()
+        $added = 0
+        foreach ($filePath in @($dialog.FileNames)) {
+            if (-not (Test-UiPathIsWithin -Parent $source -Child $filePath)) {
+                $rejected.Add($filePath)
+                continue
+            }
+            $already = $false
+            foreach ($existing in $script:SpecificFilePaths) {
+                if ($existing.Equals($filePath, [StringComparison]::OrdinalIgnoreCase)) {
+                    $already = $true
+                    break
+                }
+            }
+            if ($already) { continue }
+            $script:SpecificFilePaths.Add($filePath)
+            $added++
+        }
+        if ($added -gt 0) {
+            Sync-SpecificFilesListBox
+            Clear-PreviewSummary
+        }
+        if ($rejected.Count -gt 0) {
+            [Windows.MessageBox]::Show(
+                "These files are outside the source folder and were not added:`n`n$($rejected -join "`n")",
+                'Files outside source', 'OK', 'Warning'
+            ) | Out-Null
+        }
+    }
+    finally {
+        $dialog.Dispose()
+    }
+}
+
+function Remove-SelectedSpecificFiles {
+    $selected = @($SpecificFilesListBox.SelectedItems)
+    if ($selected.Count -eq 0) { return }
+    $source = Get-EnteredSourcePath
+    $remaining = [System.Collections.Generic.List[string]]::new()
+    foreach ($path in $script:SpecificFilePaths) {
+        $display = if ($source) { Get-SourceRelativePath -Source $source -FullPath $path } else { $path }
+        $keep = $true
+        foreach ($item in $selected) {
+            if ([string]$item -eq $display) { $keep = $false; break }
+        }
+        if ($keep) { $remaining.Add($path) }
+    }
+    $script:SpecificFilePaths = $remaining
+    Sync-SpecificFilesListBox
+    Clear-PreviewSummary
 }
 
 function ConvertTo-CommandLineArgument {
@@ -926,11 +1263,10 @@ function Get-OperationArguments {
 
     $source = $SourceTextBox.Text.Trim()
     $destination = $DestinationTextBox.Text.Trim()
-    $patterns = $FileNameTextBox.Text.Trim()
+    $specificMode = [bool]$SpecificFilesModeRadio.IsChecked
     if ([string]::IsNullOrWhiteSpace($source)) { throw 'Choose a source folder.' }
     if (-not (Test-Path -LiteralPath $source -PathType Container)) { throw "The source folder does not exist: '$source'." }
     if ([string]::IsNullOrWhiteSpace($destination)) { throw 'Choose a destination folder.' }
-    if ([string]::IsNullOrWhiteSpace($patterns)) { throw 'Enter at least one file name or wildcard pattern.' }
 
     $retryCount = Get-ValidatedInteger $RetryCountTextBox 'Retries' 0 1000000
     $retryWait = Get-ValidatedInteger $RetryWaitTextBox 'Retry wait' 0 3600
@@ -940,76 +1276,169 @@ function Get-OperationArguments {
 
     $arguments = [Collections.Generic.List[string]]::new()
     $arguments.AddRange([string[]]@(
-        '-NoLogo', '-NoProfile', '-NonInteractive', '-File', $script:EnginePath,
-        '-Source', $source, '-Destination', $destination, '-FileName', $patterns,
+        '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+        '-File', $script:EnginePath,
+        '-Source', $source, '-Destination', $destination,
         '-VerificationMode', [string]$VerificationComboBox.SelectedItem.Tag,
         '-RetryCount', [string]$retryCount, '-RetryWait', [string]$retryWait,
         '-Threads', [string]$threads, '-TimestampToleranceSeconds', [string]$tolerance,
         '-PreviewLimit', [string]$previewLimit, '-Force'
     ))
-    if ($UseStartDateCheckBox.IsChecked) {
-        if (-not $StartDatePicker.SelectedDate) { throw 'Choose a start date or clear the Start date checkbox.' }
-        $arguments.AddRange([string[]]@('-StartDate', $StartDatePicker.SelectedDate.ToString('yyyy-MM-dd')))
+
+    $fileListLines = $null
+    $usePinnedFilterList = -not $Preview -and -not $specificMode -and
+        $null -ne $script:PinnedRelativePaths
+    if ($specificMode) {
+        if ($script:SpecificFilePaths.Count -eq 0) {
+            throw 'Add at least one file to copy, or switch back to Filter by name and date.'
+        }
+        $validLines = [System.Collections.Generic.List[string]]::new()
+        foreach ($filePath in $script:SpecificFilePaths) {
+            if (-not (Test-Path -LiteralPath $filePath -PathType Leaf)) {
+                throw "A selected file no longer exists: '$filePath'."
+            }
+            if (-not (Test-UiPathIsWithin -Parent $source -Child $filePath)) {
+                throw "A selected file is outside the source folder: '$filePath'."
+            }
+            $validLines.Add($filePath)
+        }
+        $fileListLines = $validLines.ToArray()
     }
-    if ($UseEndDateCheckBox.IsChecked) {
-        if (-not $EndDatePicker.SelectedDate) { throw 'Choose an end date or clear the End date checkbox.' }
-        $arguments.AddRange([string[]]@('-EndDate', $EndDatePicker.SelectedDate.ToString('yyyy-MM-dd')))
+    elseif ($usePinnedFilterList) {
+        $fileListLines = @($script:PinnedRelativePaths)
     }
-    if ($UseStartDateCheckBox.IsChecked -and $UseEndDateCheckBox.IsChecked -and
-        $StartDatePicker.SelectedDate.Date -gt $EndDatePicker.SelectedDate.Date) {
-        throw 'Start date cannot be later than end date.'
+    else {
+        $patterns = $FileNameTextBox.Text.Trim()
+        if ([string]::IsNullOrWhiteSpace($patterns)) {
+            throw 'Enter at least one file name or wildcard pattern. Use * for all files.'
+        }
+        $arguments.AddRange([string[]]@('-FileName', $patterns))
+        if ($UseStartDateCheckBox.IsChecked) {
+            if (-not $StartDatePicker.SelectedDate) { throw 'Choose a start date or clear the Start date checkbox.' }
+            $arguments.AddRange([string[]]@('-StartDate', $StartDatePicker.SelectedDate.ToString('yyyy-MM-dd')))
+        }
+        if ($UseEndDateCheckBox.IsChecked) {
+            if (-not $EndDatePicker.SelectedDate) { throw 'Choose an end date or clear the End date checkbox.' }
+            $arguments.AddRange([string[]]@('-EndDate', $EndDatePicker.SelectedDate.ToString('yyyy-MM-dd')))
+        }
+        if ($UseStartDateCheckBox.IsChecked -and $UseEndDateCheckBox.IsChecked -and
+            $StartDatePicker.SelectedDate.Date -gt $EndDatePicker.SelectedDate.Date) {
+            throw 'Start date cannot be later than end date.'
+        }
+        if ($RecurseCheckBox.IsChecked) { $arguments.Add('-Recurse') }
+        if ($FollowLinksCheckBox.IsChecked) { $arguments.Add('-FollowReparsePoint') }
     }
-    if ($RecurseCheckBox.IsChecked) { $arguments.Add('-Recurse') }
-    if ($FollowLinksCheckBox.IsChecked) { $arguments.Add('-FollowReparsePoint') }
+
     if ($Preview) { $arguments.Add('-DryRun') }
     $logFolder = $LogFolderTextBox.Text.Trim()
     if ($logFolder) { $arguments.AddRange([string[]]@('-LogFolder', $logFolder)) }
-    return $arguments.ToArray()
+    return [pscustomobject]@{
+        Arguments    = $arguments.ToArray()
+        FileListLines = $fileListLines
+        Source       = $source
+        Destination  = $destination
+        SpecificMode = $specificMode
+    }
 }
 
 function Start-CopyOperation {
     param([switch]$Preview)
     try {
-        $arguments = Get-OperationArguments -Preview:$Preview
+        $operation = Get-OperationArguments -Preview:$Preview
     }
     catch {
         [Windows.MessageBox]::Show($_.Exception.Message, 'Check the settings', 'OK', 'Warning') | Out-Null
         return
     }
 
+    $arguments = [Collections.Generic.List[string]]::new()
+    $arguments.AddRange([string[]]$operation.Arguments)
     $previewSummaryPath = $null
+    $fileListPath = $null
     if ($Preview) {
         Clear-PreviewSummary
         $previewSummaryPath = Join-Path ([IO.Path]::GetTempPath()) `
             ("CopyFromTo-preview-{0}.json" -f [guid]::NewGuid().ToString('N'))
-        $arguments = @($arguments) + @('-PreviewSummaryPath', $previewSummaryPath)
+        $arguments.AddRange([string[]]@('-PreviewSummaryPath', $previewSummaryPath))
     }
 
+    if ($operation.FileListLines) {
+        $fileListPath = Join-Path ([IO.Path]::GetTempPath()) `
+            ("CopyFromTo-files-{0}.txt" -f [guid]::NewGuid().ToString('N'))
+        $utf8NoBom = [Text.UTF8Encoding]::new($false)
+        [IO.File]::WriteAllLines($fileListPath, [string[]]$operation.FileListLines, $utf8NoBom)
+        $arguments.AddRange([string[]]@('-FileListPath', $fileListPath))
+    }
+
+    $arguments = $arguments.ToArray()
+
     if (-not $Preview) {
-        $source = $SourceTextBox.Text.Trim()
-        $destination = $DestinationTextBox.Text.Trim()
+        $source = $operation.Source
+        $destination = $operation.Destination
         if (Test-Path -LiteralPath $destination -PathType Leaf) {
             [Windows.MessageBox]::Show(
                 "The destination path is an existing file, not a folder:`n`n$destination",
                 'Invalid destination', 'OK', 'Error'
             ) | Out-Null
+            Remove-FileListFile
+            if ($fileListPath -and (Test-Path -LiteralPath $fileListPath -PathType Leaf)) {
+                Remove-Item -LiteralPath $fileListPath -Force -ErrorAction SilentlyContinue
+            }
             return
         }
+
+        $fileCount = $null
+        $sizeText = $null
+        if ($operation.SpecificMode) {
+            $fileCount = $script:SpecificFilePaths.Count
+        }
+        elseif ($null -ne $script:PinnedMatchedCount) {
+            $fileCount = [int]$script:PinnedMatchedCount
+            if ($null -ne $script:PinnedTotalBytes) {
+                $sizeText = Format-PreviewByteSize -Bytes ([long]$script:PinnedTotalBytes)
+            }
+        }
+        if ($null -ne $fileCount -and $fileCount -eq 0) {
+            [Windows.MessageBox]::Show(
+                'Nothing to copy. Preview found no matching files, or no files are selected.',
+                'Nothing to copy', 'OK', 'Information'
+            ) | Out-Null
+            if ($fileListPath -and (Test-Path -LiteralPath $fileListPath -PathType Leaf)) {
+                Remove-Item -LiteralPath $fileListPath -Force -ErrorAction SilentlyContinue
+            }
+            return
+        }
+
+        $countPhrase = if ($null -eq $fileCount) {
+            'matching files'
+        }
+        elseif ($fileCount -eq 1) {
+            '1 file'
+        }
+        else {
+            '{0:N0} files' -f $fileCount
+        }
+        if ($sizeText) { $countPhrase = "$countPhrase ($sizeText)" }
 
         $destinationExists = Test-Path -LiteralPath $destination -PathType Container
         if ($destinationExists) {
             $confirmation = [Windows.MessageBox]::Show(
-                "Copy matching files now?`n`nFrom: $source`nTo:   $destination",
+                "Copy $countPhrase now?`n`nFrom: $source`nTo:   $destination",
                 'Confirm copy', 'YesNo', 'Question'
             )
         }
         else {
             $confirmation = [Windows.MessageBox]::Show(
-                "The destination folder does not exist:`n`n$destination`n`nCopyFromTo will create it before copying files.`n`nCreate the folder and start copying?",
+                "The destination folder does not exist:`n`n$destination`n`nCopyFromTo will create it before copying $countPhrase.`n`nCreate the folder and start copying?",
                 'Create destination folder?', 'YesNo', 'Warning'
             )
         }
-        if ($confirmation -ne 'Yes') { return }
+        if ($confirmation -ne 'Yes') {
+            if ($fileListPath -and (Test-Path -LiteralPath $fileListPath -PathType Leaf)) {
+                Remove-Item -LiteralPath $fileListPath -Force -ErrorAction SilentlyContinue
+            }
+            return
+        }
     }
 
     $OutputTextBox.Clear()
@@ -1034,6 +1463,7 @@ function Start-CopyOperation {
         $script:ActiveProcess = $process
         $script:OutputCollector = $collector
         $script:PreviewSummaryPath = $previewSummaryPath
+        $script:FileListPath = $fileListPath
         $script:ActiveOperationIsPreview = [bool]$Preview
         $script:CancelRequested = $false
         $script:PendingExitCode = $null
@@ -1051,7 +1481,11 @@ function Start-CopyOperation {
         if ($previewSummaryPath -and (Test-Path -LiteralPath $previewSummaryPath -PathType Leaf)) {
             Remove-Item -LiteralPath $previewSummaryPath -Force -ErrorAction SilentlyContinue
         }
+        if ($fileListPath -and (Test-Path -LiteralPath $fileListPath -PathType Leaf)) {
+            Remove-Item -LiteralPath $fileListPath -Force -ErrorAction SilentlyContinue
+        }
         $script:PreviewSummaryPath = $null
+        $script:FileListPath = $null
         $script:ActiveOperationIsPreview = $false
         Set-OperationResult -Result Failed -Detail 'The copy process could not be started.'
         [Windows.MessageBox]::Show("Could not start CopyFromTo.ps1. $($_.Exception.Message)", 'Launch failed', 'OK', 'Error') | Out-Null
@@ -1076,7 +1510,20 @@ $UseEndDateCheckBox.Add_Unchecked({
 })
 $StartDatePicker.Add_SelectedDateChanged({ Clear-PreviewSummary })
 $EndDatePicker.Add_SelectedDateChanged({ Clear-PreviewSummary })
-$SourceTextBox.Add_TextChanged({ Clear-PreviewSummary })
+$SourceTextBox.Add_TextChanged({
+    Clear-PreviewSummary
+    $source = Get-EnteredSourcePath
+    if ($source -and $script:SpecificFilePaths.Count -gt 0) {
+        $kept = [System.Collections.Generic.List[string]]::new()
+        foreach ($path in $script:SpecificFilePaths) {
+            if (Test-UiPathIsWithin -Parent $source -Child $path) { $kept.Add($path) }
+        }
+        if ($kept.Count -ne $script:SpecificFilePaths.Count) {
+            $script:SpecificFilePaths = $kept
+        }
+    }
+    Sync-SpecificFilesListBox
+})
 $FileNameTextBox.Add_TextChanged({ Clear-PreviewSummary })
 $RecurseCheckBox.Add_Checked({ Clear-PreviewSummary })
 $RecurseCheckBox.Add_Unchecked({ Clear-PreviewSummary })
@@ -1085,16 +1532,21 @@ $FollowLinksCheckBox.Add_Checked({
     Clear-PreviewSummary
 })
 $FollowLinksCheckBox.Add_Unchecked({ Clear-PreviewSummary })
+$FilterModeRadio.Add_Checked({ Set-SelectionMode })
+$SpecificFilesModeRadio.Add_Checked({ Set-SelectionMode })
+$AddFilesButton.Add_Click({ Add-SpecificFilesFromDialog })
+$RemoveFilesButton.Add_Click({ Remove-SelectedSpecificFiles })
+Set-SelectionMode
 $BrowseSourceButton.Add_Click({
-    $selected = Select-Folder $SourceTextBox.Text.Trim()
+    $selected = Select-Folder -InitialPath $SourceTextBox.Text.Trim() -Description 'Select the source folder'
     if ($selected) { $SourceTextBox.Text = $selected }
 })
 $BrowseDestinationButton.Add_Click({
-    $selected = Select-Folder $DestinationTextBox.Text.Trim()
+    $selected = Select-Folder -InitialPath $DestinationTextBox.Text.Trim() -Description 'Select the destination folder'
     if ($selected) { $DestinationTextBox.Text = $selected }
 })
 $BrowseLogButton.Add_Click({
-    $selected = Select-Folder $LogFolderTextBox.Text.Trim()
+    $selected = Select-Folder -InitialPath $LogFolderTextBox.Text.Trim() -Description 'Select the log folder'
     if ($selected) { $LogFolderTextBox.Text = $selected }
 })
 $ThemeToggleButton.Add_Click({
@@ -1170,6 +1622,7 @@ $window.Add_Closing({
     }
     Remove-ProcessOutputCollector
     Remove-PreviewSummaryFile
+    Remove-FileListFile
     $timer.Stop()
 })
 

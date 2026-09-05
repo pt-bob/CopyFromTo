@@ -11,10 +11,13 @@
     is available with -VerificationMode Hash.
 
     If -FileName and/or -StartDate/-EndDate are not supplied, the script prompts for
-    them interactively. Use -Force for unattended runs: filter and confirmation prompts
-    are skipped, missing filters default to "all files" / "no date limit", and the
-    destination folder is created automatically if missing. Source and Destination must
-    still be supplied when -Force is used.
+    them interactively. Use -LiteralFile or -FileListPath to copy specific files instead
+    of filtering by name pattern and date; those options skip name/date prompts and
+    cannot be combined with -FileName, date bounds, -Recurse, or -FollowReparsePoint.
+    Use -Force for unattended runs: filter and confirmation prompts are skipped,
+    missing filters default to "all files" / "no date limit", and the destination
+    folder is created automatically if missing. Source and Destination must still be
+    supplied when -Force is used.
 
     The previewed file list is the exact transfer list. Robocopy is invoked once per
     source directory (and in command-line-sized batches) with exact file names, so it
@@ -31,7 +34,23 @@
     One or more file names or wildcard patterns (e.g. "*.pdf", "Invoice*.xlsx"). For
     multiple patterns, separate them with a comma (e.g. "*.pdf,Invoice*.xlsx" or, from
     PowerShell code, an array). If omitted, you will be prompted. Leave blank at the
-    prompt for all files.
+    prompt for all files. Tokens without * or ? are matched as literal names, so a
+    file named file[1].txt can be selected by typing that name. Cannot be combined
+    with -LiteralFile or -FileListPath.
+
+.PARAMETER LiteralFile
+    Specific files to copy, relative to Source or as absolute paths that resolve
+    inside Source. Subfolder files are allowed without -Recurse; destination folders
+    preserve the relative path. For multiple files, separate them with a comma, or
+    pass an array from PowerShell code. Names that contain a comma must be supplied
+    through -FileListPath instead. Cannot be combined with -FileName, date filters,
+    -Recurse, or -FollowReparsePoint.
+
+.PARAMETER FileListPath
+    UTF-8 text file listing one source file per line (relative to Source or absolute
+    and inside Source). Empty lines and lines starting with # are ignored. Intended
+    for the desktop UI and for names that contain commas. Same exclusions as
+    -LiteralFile.
 
 .PARAMETER StartDate
     Only copy files last modified on or after this date. Accepted forms are yyyy-MM-dd,
@@ -88,8 +107,8 @@
 
 .PARAMETER PreviewSummaryPath
     Optional path where a dry run writes a small JSON summary containing the exact
-    matched file count and total bytes. Intended for trusted UI or automation callers.
-    The normal console output and copy behavior are unchanged.
+    matched file count, total bytes, and source-relative paths. Intended for trusted
+    UI or automation callers. The normal console output and copy behavior are unchanged.
 
 .PARAMETER PassThru
     Emit a structured result object after a completed copy. By default, results are
@@ -117,6 +136,15 @@
     .\CopyFromTo.ps1 -Source 'C:\Data' -Destination '\\NAS\Backup\Data' -Force
     Unattended run: copies all files, no date filter, no prompts.
 
+.EXAMPLE
+    .\CopyFromTo.ps1 -Source 'C:\Data' -Destination 'D:\Backup' -LiteralFile 'Report.pdf,2024\Invoice.xlsx' -Force
+    Copies those two files only, including a file in a subfolder, without a date
+    filter or recursive enumeration.
+
+.EXAMPLE
+    .\CopyFromTo.ps1 -Source 'C:\Data' -Destination 'D:\Backup' -FileListPath 'C:\Temp\copy-list.txt' -Force
+    Copies the files listed in the text file, one path per line.
+
 .NOTES
     Exit codes: 0 success, 1 verification issues, 2 runtime/fatal error, and 3 user
     cancellation. Errors raised by PowerShell itself before the script starts (for
@@ -135,6 +163,12 @@ param(
 
     [Parameter(ParameterSetName = 'Default')]
     [string[]]$FileName,
+
+    [Parameter(ParameterSetName = 'Default')]
+    [string[]]$LiteralFile,
+
+    [Parameter(ParameterSetName = 'Default')]
+    [string]$FileListPath,
 
     [Parameter(ParameterSetName = 'Default')]
     [object]$StartDate,
@@ -547,6 +581,84 @@ function Get-SourceFiles {
     return $files.ToArray()
 }
 
+function ConvertTo-LikeLiteralIfExact {
+    param([Parameter(Mandatory)] [string]$Pattern)
+    # PowerShell -like treats [, ], ?, *, and ` as wildcards. Users who type an
+    # exact file name such as file[1].txt expect a literal match, so escape the
+    # pattern unless it already contains * or ?.
+    if ($Pattern.IndexOfAny([char[]]@('*', '?')) -ge 0) {
+        return $Pattern
+    }
+    return [WildcardPattern]::Escape($Pattern)
+}
+
+function Get-LiteralFileEntries {
+    param(
+        [string[]]$Values,
+        [string]$ListPath
+    )
+
+    $entries = [System.Collections.Generic.List[string]]::new()
+    if ($Values) {
+        foreach ($value in $Values) {
+            foreach ($part in @($value -split ',')) {
+                $trimmed = $part.Trim()
+                if ($trimmed -ne '') { $entries.Add($trimmed) }
+            }
+        }
+    }
+    if (-not [string]::IsNullOrWhiteSpace($ListPath)) {
+        if (-not (Test-Path -LiteralPath $ListPath -PathType Leaf)) {
+            throw "File list not found: '$ListPath'."
+        }
+        foreach ($line in @(Get-Content -LiteralPath $ListPath -Encoding UTF8)) {
+            $trimmed = ([string]$line).Trim()
+            if ($trimmed -eq '' -or $trimmed.StartsWith('#')) { continue }
+            $entries.Add($trimmed)
+        }
+    }
+    return $entries.ToArray()
+}
+
+function Resolve-LiteralSourceFile {
+    param(
+        [Parameter(Mandatory)] [string]$Source,
+        [Parameter(Mandatory)] [string]$Path
+    )
+
+    $candidate = $Path
+    if (-not [IO.Path]::IsPathRooted($candidate)) {
+        $candidate = Join-Path $Source $candidate
+    }
+    $fullPath = Resolve-PhysicalFileSystemPath -Path $candidate -MustExist
+    if (-not (Test-Path -LiteralPath $fullPath -PathType Leaf)) {
+        throw "Literal file '$Path' is not a file."
+    }
+    if (-not (Test-PathIsWithin -Parent $Source -Child $fullPath)) {
+        throw "Literal file '$Path' is outside source '$Source'."
+    }
+    return Get-Item -LiteralPath $fullPath -ErrorAction Stop
+}
+
+function Copy-LiteralSourceFile {
+    param(
+        [Parameter(Mandatory)] [string]$SourcePath,
+        [Parameter(Mandatory)] [string]$DestinationPath
+    )
+
+    $destinationDirectory = Split-Path -Parent $DestinationPath
+    if (-not (Test-Path -LiteralPath $destinationDirectory -PathType Container)) {
+        New-Item -ItemType Directory -Path $destinationDirectory -Force -ErrorAction Stop | Out-Null
+    }
+
+    Copy-Item -LiteralPath $SourcePath -Destination $DestinationPath -Force -ErrorAction Stop
+    $sourceItem = Get-Item -LiteralPath $SourcePath -ErrorAction Stop
+    $destItem = Get-Item -LiteralPath $DestinationPath -ErrorAction Stop
+    $destItem.LastWriteTimeUtc = $sourceItem.LastWriteTimeUtc
+    $destItem.CreationTimeUtc = $sourceItem.CreationTimeUtc
+    $destItem.Attributes = $sourceItem.Attributes
+}
+
 function Split-FileNameBatches {
     param(
         [Parameter(Mandatory)] [string[]]$Names,
@@ -659,74 +771,119 @@ try {
         throw "Destination '$Destination' cannot be inside source '$Source'. Choose a destination outside the source tree."
     }
 
-    # --- File name pattern(s) ---
-    if (-not $FileName -or $FileName.Count -eq 0) {
-        $FileName = if ($Force) { @('*') } else { Read-FileNamePatterns }
-    }
-    # Normalizes both calling styles: a real array (only reachable via PowerShell-native
-    # splatting, since a plain external-process argv can't produce one) and the
-    # comma-joined single string a CLI/Task Scheduler caller would actually pass
-    # (e.g. -FileName '*.txt,*.csv'), matching the comma convention used at the prompt.
-    $FileName = @($FileName | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' })
-    if ($FileName.Count -eq 0) {
-        throw 'At least one non-empty file name or wildcard pattern is required.'
-    }
-    foreach ($pattern in $FileName) {
-        if ($pattern.IndexOfAny([char[]]@('\', '/')) -ge 0) {
-            throw "File pattern '$pattern' contains a path separator. Patterns must match file names only."
-        }
-    }
-    Write-Log "File name pattern(s): $($FileName -join ', ')"
-
-    # --- Date range ---
+    $literalMode = (($LiteralFile -and $LiteralFile.Count -gt 0) -or
+        -not [string]::IsNullOrWhiteSpace($FileListPath))
+    $fileNameProvided = $FileName -and $FileName.Count -gt 0
     $startProvided = $PSBoundParameters.ContainsKey('StartDate')
     $endProvided = $PSBoundParameters.ContainsKey('EndDate')
 
-    if (-not $startProvided -and -not $endProvided -and -not $Force) {
-        $range = Read-DateRange
-        $rangeStart = $range.StartDate
-        $rangeEnd = $range.EndDate
-    }
-    else {
-        $rangeStart = if ($startProvided) { ConvertTo-DateBound -Value $StartDate } else { $null }
-        $rangeEnd = if ($endProvided) { ConvertTo-DateBound -Value $EndDate -EndOfMonth } else { $null }
-    }
-    if ($rangeStart -and $rangeEnd -and $rangeStart -gt $rangeEnd) {
-        throw "StartDate '$($rangeStart.ToString('yyyy-MM-dd'))' cannot be later than EndDate '$($rangeEnd.ToString('yyyy-MM-dd'))'."
-    }
-    if ($rangeStart -or $rangeEnd) {
-        $startText = if ($rangeStart) { $rangeStart.ToString('yyyy-MM-dd') } else { 'unbounded' }
-        $endText = if ($rangeEnd) { $rangeEnd.ToString('yyyy-MM-dd') } else { 'unbounded' }
-        Write-Log "Date range: $startText to $endText (last-write time)"
-    }
-    else {
-        Write-Log 'Date range: none (all dates included)'
+    if ($literalMode) {
+        if ($fileNameProvided) {
+            throw '-FileName cannot be combined with -LiteralFile or -FileListPath.'
+        }
+        if ($startProvided -or $endProvided) {
+            throw 'Date filters cannot be combined with -LiteralFile or -FileListPath.'
+        }
+        if ($Recurse) {
+            throw '-Recurse cannot be used with -LiteralFile or -FileListPath.'
+        }
+        if ($FollowReparsePoint) {
+            throw '-FollowReparsePoint cannot be used with -LiteralFile or -FileListPath.'
+        }
     }
 
-    # --- Compute the matching file set in PowerShell for preview/verification ---
-    $activeLogPaths = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-    foreach ($activeLogPath in @($script:LogFile, $script:RobocopyLogFile)) {
-        if ($activeLogPath) {
-            $null = $activeLogPaths.Add((Resolve-FullFileSystemPath -Path $activeLogPath))
+    $rangeStart = $null
+    $rangeEnd = $null
+    $matchedFiles = @()
+
+    if ($literalMode) {
+        $literalEntries = @(Get-LiteralFileEntries -Values $LiteralFile -ListPath $FileListPath)
+        if ($literalEntries.Count -eq 0) {
+            throw 'At least one file is required for -LiteralFile or -FileListPath.'
         }
+
+        $seenLiteralPaths = [System.Collections.Generic.HashSet[string]]::new(
+            [System.StringComparer]::OrdinalIgnoreCase
+        )
+        $literalFiles = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
+        foreach ($entry in $literalEntries) {
+            $item = Resolve-LiteralSourceFile -Source $Source -Path $entry
+            if ($seenLiteralPaths.Add($item.FullName)) {
+                $literalFiles.Add($item)
+            }
+        }
+        $matchedFiles = $literalFiles.ToArray()
+        Write-Log "Literal file list: $($matchedFiles.Count) file(s)"
+        Write-Log 'Date range: none (specific files; date filters do not apply)'
     }
-    $allCandidateFiles = @(Get-SourceFiles -Root $Source -Recursive:$Recurse -FollowLinks:$FollowReparsePoint)
-    $candidateFiles = @($allCandidateFiles | Where-Object { -not $activeLogPaths.Contains($_.FullName) })
-    $excludedActiveLogCount = $allCandidateFiles.Count - $candidateFiles.Count
-    if ($excludedActiveLogCount -gt 0) {
-        Write-Log "Excluded $excludedActiveLogCount active run log file(s) from the transfer set." 'WARN'
-    }
-    $matchedFiles = @($candidateFiles | Where-Object {
-        $file = $_
-        $nameMatch = $false
+    else {
+        # --- File name pattern(s) ---
+        if (-not $fileNameProvided) {
+            $FileName = if ($Force) { @('*') } else { Read-FileNamePatterns }
+        }
+        # Normalizes both calling styles: a real array (only reachable via PowerShell-native
+        # splatting, since a plain external-process argv can't produce one) and the
+        # comma-joined single string a CLI/Task Scheduler caller would actually pass
+        # (e.g. -FileName '*.txt,*.csv'), matching the comma convention used at the prompt.
+        $FileName = @($FileName | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' })
+        if ($FileName.Count -eq 0) {
+            throw 'At least one non-empty file name or wildcard pattern is required.'
+        }
         foreach ($pattern in $FileName) {
-            if ($file.Name -like $pattern) { $nameMatch = $true; break }
+            if ($pattern.IndexOfAny([char[]]@('\', '/')) -ge 0) {
+                throw "File pattern '$pattern' contains a path separator. Patterns must match file names only."
+            }
         }
-        if (-not $nameMatch) { return $false }
-        if ($rangeStart -and $file.LastWriteTime.Date -lt $rangeStart) { return $false }
-        if ($rangeEnd -and $file.LastWriteTime.Date -gt $rangeEnd) { return $false }
-        return $true
-    })
+        Write-Log "File name pattern(s): $($FileName -join ', ')"
+
+        # --- Date range ---
+        if (-not $startProvided -and -not $endProvided -and -not $Force) {
+            $range = Read-DateRange
+            $rangeStart = $range.StartDate
+            $rangeEnd = $range.EndDate
+        }
+        else {
+            $rangeStart = if ($startProvided) { ConvertTo-DateBound -Value $StartDate } else { $null }
+            $rangeEnd = if ($endProvided) { ConvertTo-DateBound -Value $EndDate -EndOfMonth } else { $null }
+        }
+        if ($rangeStart -and $rangeEnd -and $rangeStart -gt $rangeEnd) {
+            throw "StartDate '$($rangeStart.ToString('yyyy-MM-dd'))' cannot be later than EndDate '$($rangeEnd.ToString('yyyy-MM-dd'))'."
+        }
+        if ($rangeStart -or $rangeEnd) {
+            $startText = if ($rangeStart) { $rangeStart.ToString('yyyy-MM-dd') } else { 'unbounded' }
+            $endText = if ($rangeEnd) { $rangeEnd.ToString('yyyy-MM-dd') } else { 'unbounded' }
+            Write-Log "Date range: $startText to $endText (last-write time)"
+        }
+        else {
+            Write-Log 'Date range: none (all dates included)'
+        }
+
+        # --- Compute the matching file set in PowerShell for preview/verification ---
+        $activeLogPaths = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        foreach ($activeLogPath in @($script:LogFile, $script:RobocopyLogFile)) {
+            if ($activeLogPath) {
+                $null = $activeLogPaths.Add((Resolve-FullFileSystemPath -Path $activeLogPath))
+            }
+        }
+        $allCandidateFiles = @(Get-SourceFiles -Root $Source -Recursive:$Recurse -FollowLinks:$FollowReparsePoint)
+        $candidateFiles = @($allCandidateFiles | Where-Object { -not $activeLogPaths.Contains($_.FullName) })
+        $excludedActiveLogCount = $allCandidateFiles.Count - $candidateFiles.Count
+        if ($excludedActiveLogCount -gt 0) {
+            Write-Log "Excluded $excludedActiveLogCount active run log file(s) from the transfer set." 'WARN'
+        }
+        $likePatterns = @($FileName | ForEach-Object { ConvertTo-LikeLiteralIfExact $_ })
+        $matchedFiles = @($candidateFiles | Where-Object {
+            $file = $_
+            $nameMatch = $false
+            foreach ($pattern in $likePatterns) {
+                if ($file.Name -like $pattern) { $nameMatch = $true; break }
+            }
+            if (-not $nameMatch) { return $false }
+            if ($rangeStart -and $file.LastWriteTime.Date -lt $rangeStart) { return $false }
+            if ($rangeEnd -and $file.LastWriteTime.Date -gt $rangeEnd) { return $false }
+            return $true
+        })
+    }
 
     [long]$totalBytes = if ($matchedFiles.Count -eq 0) {
         0
@@ -735,7 +892,12 @@ try {
         ($matchedFiles | Measure-Object -Property Length -Sum).Sum
     }
 
-    Write-Log "$($matchedFiles.Count) file(s) matched the name pattern(s) and date range."
+    if ($literalMode) {
+        Write-Log "$($matchedFiles.Count) specified file(s) ready to copy."
+    }
+    else {
+        Write-Log "$($matchedFiles.Count) file(s) matched the name pattern(s) and date range."
+    }
 
     if ($PreviewSummaryPath) {
         $summaryParent = Split-Path -Parent $PreviewSummaryPath
@@ -744,11 +906,15 @@ try {
             throw "Preview summary folder does not exist: '$summaryParent'."
         }
 
+        $relativePaths = @(
+            $matchedFiles | ForEach-Object { Get-RelativeFilePath -BasePath $Source -FullPath $_.FullName }
+        )
         $previewSummary = [ordered]@{
-            SchemaVersion = 1
+            SchemaVersion = 2
             MatchedFiles  = $matchedFiles.Count
             TotalBytes    = $totalBytes
             GeneratedUtc  = [datetime]::UtcNow.ToString('o')
+            RelativePaths = $relativePaths
         }
         $previewSummary | ConvertTo-Json -Compress |
             Set-Content -LiteralPath $PreviewSummaryPath -Encoding UTF8 -ErrorAction Stop
@@ -832,6 +998,26 @@ try {
         }
         $destinationDirectory = if ($relativeDirectory) { Join-Path $Destination $relativeDirectory } else { $Destination }
         $names = [string[]]@($group.Group | ForEach-Object Name | Sort-Object -Unique)
+        $robocopyNames = [System.Collections.Generic.List[string]]::new()
+        foreach ($name in $names) {
+            if ($name.IndexOfAny([char[]]@('*', '?')) -ge 0) {
+                $sourceFilePath = Join-Path $sourceDirectory $name
+                $destinationFilePath = Join-Path $destinationDirectory $name
+                Write-Log "Copying '$name' with Copy-Item because the name contains Robocopy wildcard characters."
+                try {
+                    Copy-LiteralSourceFile -SourcePath $sourceFilePath -DestinationPath $destinationFilePath
+                }
+                catch {
+                    Write-Log "Copy-Item failed for '$name': $($_.Exception.Message)" 'ERROR'
+                    $exitStatus = 2
+                }
+            }
+            else {
+                $robocopyNames.Add($name)
+            }
+        }
+        if ($robocopyNames.Count -eq 0) { continue }
+        $names = $robocopyNames.ToArray()
 
         foreach ($batch in @(Split-FileNameBatches -Names $names)) {
             $roboArgs = [System.Collections.Generic.List[string]]::new()

@@ -200,6 +200,159 @@ Describe 'CopyFromTo.ps1' {
             $result.ExitCode | Should -Be 0
             Test-Path -LiteralPath "$DestDir\LICENSE" | Should -BeTrue
         }
+
+        It 'matches an exact name containing [ ] as a literal, not a character class' {
+            New-TestFile "$SourceDir\file[1].txt" -LastWriteTime '2024-05-01'
+            New-TestFile "$SourceDir\file1.txt" -LastWriteTime '2024-05-01'
+
+            $result = Invoke-CopyFromTo -ScriptArgs @(
+                '-Source', $SourceDir, '-Destination', $DestDir,
+                '-FileName', 'file[1].txt', '-Force', '-LogFolder', $LogDir
+            )
+
+            $result.ExitCode | Should -Be 0
+            Test-Path -LiteralPath "$DestDir\file[1].txt" | Should -BeTrue
+            Test-Path -LiteralPath "$DestDir\file1.txt" | Should -BeFalse
+        }
+    }
+
+    Context 'Literal file selection' {
+
+        It 'copies a single named file without a date filter or recursion' {
+            New-TestFile "$SourceDir\Report.pdf" -LastWriteTime '2024-05-01'
+            New-TestFile "$SourceDir\Other.pdf" -LastWriteTime '2024-05-01'
+            New-TestFile "$SourceDir\Sub\Nested.pdf" -LastWriteTime '2024-05-01'
+
+            $result = Invoke-CopyFromTo -ScriptArgs @(
+                '-Source', $SourceDir, '-Destination', $DestDir,
+                '-LiteralFile', 'Report.pdf', '-Force', '-LogFolder', $LogDir
+            )
+
+            $result.ExitCode | Should -Be 0
+            Test-Path -LiteralPath "$DestDir\Report.pdf" | Should -BeTrue
+            Test-Path -LiteralPath "$DestDir\Other.pdf" | Should -BeFalse
+            Test-Path -LiteralPath "$DestDir\Sub\Nested.pdf" | Should -BeFalse
+        }
+
+        It 'copies specific files in subfolders without -Recurse' {
+            New-TestFile "$SourceDir\Top.txt" -LastWriteTime '2024-05-01'
+            New-TestFile "$SourceDir\Sub\Nested.txt" -LastWriteTime '2024-05-01'
+            New-TestFile "$SourceDir\Sub\Skip.txt" -LastWriteTime '2024-05-01'
+
+            $result = Invoke-CopyFromTo -ScriptArgs @(
+                '-Source', $SourceDir, '-Destination', $DestDir,
+                '-LiteralFile', 'Top.txt,Sub\Nested.txt', '-Force', '-LogFolder', $LogDir
+            )
+
+            $result.ExitCode | Should -Be 0
+            Test-Path -LiteralPath "$DestDir\Top.txt" | Should -BeTrue
+            Test-Path -LiteralPath "$DestDir\Sub\Nested.txt" | Should -BeTrue
+            Test-Path -LiteralPath "$DestDir\Sub\Skip.txt" | Should -BeFalse
+        }
+
+        It 'copies a file whose name contains a comma when listed in -FileListPath' {
+            New-TestFile "$SourceDir\Report,Final.txt" -LastWriteTime '2024-05-01'
+            $listPath = Join-Path $script:CaseRoot 'files.txt'
+            Set-Content -LiteralPath $listPath -Value "Report,Final.txt" -Encoding UTF8
+
+            $result = Invoke-CopyFromTo -ScriptArgs @(
+                '-Source', $SourceDir, '-Destination', $DestDir,
+                '-FileListPath', $listPath, '-Force', '-LogFolder', $LogDir
+            )
+
+            $result.ExitCode | Should -Be 0
+            Test-Path -LiteralPath "$DestDir\Report,Final.txt" | Should -BeTrue
+        }
+
+        It 'copies a literal file whose name contains [ ]' {
+            New-TestFile "$SourceDir\file[1].txt" -LastWriteTime '2024-05-01'
+            New-TestFile "$SourceDir\file1.txt" -LastWriteTime '2024-05-01'
+
+            $result = Invoke-CopyFromTo -ScriptArgs @(
+                '-Source', $SourceDir, '-Destination', $DestDir,
+                '-LiteralFile', 'file[1].txt', '-Force', '-LogFolder', $LogDir
+            )
+
+            $result.ExitCode | Should -Be 0
+            Test-Path -LiteralPath "$DestDir\file[1].txt" | Should -BeTrue
+            Test-Path -LiteralPath "$DestDir\file1.txt" | Should -BeFalse
+        }
+
+        It 'rejects a file outside the source folder' {
+            $outsideDir = Join-Path $script:CaseRoot 'Outside'
+            New-TestFile "$outsideDir\Away.txt" -LastWriteTime '2024-05-01'
+
+            $result = Invoke-CopyFromTo -ScriptArgs @(
+                '-Source', $SourceDir, '-Destination', $DestDir,
+                '-LiteralFile', "$outsideDir\Away.txt", '-Force', '-LogFolder', $LogDir
+            )
+
+            $result.ExitCode | Should -Be 2
+            $result.Output | Should -Match 'outside source'
+        }
+
+        It 'rejects a missing literal file' {
+            $result = Invoke-CopyFromTo -ScriptArgs @(
+                '-Source', $SourceDir, '-Destination', $DestDir,
+                '-LiteralFile', 'Nope.txt', '-Force', '-LogFolder', $LogDir
+            )
+
+            $result.ExitCode | Should -Be 2
+            $result.Output | Should -Match 'Nope.txt'
+        }
+
+        It 'rejects combining -LiteralFile with -FileName' {
+            New-TestFile "$SourceDir\File1.txt" -LastWriteTime '2024-05-01'
+            $result = Invoke-CopyFromTo -ScriptArgs @(
+                '-Source', $SourceDir, '-Destination', $DestDir,
+                '-LiteralFile', 'File1.txt', '-FileName', '*.txt',
+                '-Force', '-LogFolder', $LogDir
+            )
+
+            $result.ExitCode | Should -Be 2
+            $result.Output | Should -Match '-FileName cannot be combined'
+        }
+
+        It 'rejects combining -LiteralFile with a date filter' {
+            New-TestFile "$SourceDir\File1.txt" -LastWriteTime '2024-05-01'
+            $result = Invoke-CopyFromTo -ScriptArgs @(
+                '-Source', $SourceDir, '-Destination', $DestDir,
+                '-LiteralFile', 'File1.txt', '-StartDate', '2024-01-01',
+                '-Force', '-LogFolder', $LogDir
+            )
+
+            $result.ExitCode | Should -Be 2
+            $result.Output | Should -Match 'Date filters cannot be combined'
+        }
+
+        It 'rejects combining -LiteralFile with -Recurse' {
+            New-TestFile "$SourceDir\File1.txt" -LastWriteTime '2024-05-01'
+            $result = Invoke-CopyFromTo -ScriptArgs @(
+                '-Source', $SourceDir, '-Destination', $DestDir,
+                '-LiteralFile', 'File1.txt', '-Recurse',
+                '-Force', '-LogFolder', $LogDir
+            )
+
+            $result.ExitCode | Should -Be 2
+            $result.Output | Should -Match '-Recurse cannot be used'
+        }
+
+        It 'exports preview summary paths for a literal dry run' {
+            New-TestFile "$SourceDir\Keep.txt" -LastWriteTime '2024-05-01'
+            $summaryPath = Join-Path $TestDrive 'literal-preview.json'
+
+            $result = Invoke-CopyFromTo -ScriptArgs @(
+                '-Source', $SourceDir, '-Destination', $DestDir,
+                '-LiteralFile', 'Keep.txt', '-Force', '-DryRun',
+                '-PreviewSummaryPath', $summaryPath, '-LogFolder', $LogDir
+            )
+            $summary = Get-Content -LiteralPath $summaryPath -Raw | ConvertFrom-Json
+
+            $result.ExitCode | Should -Be 0
+            $summary.MatchedFiles | Should -Be 1
+            @($summary.RelativePaths) | Should -Be @('Keep.txt')
+            Test-Path -LiteralPath $DestDir | Should -BeFalse
+        }
     }
 
     Context 'Interactive prompts' {
@@ -643,9 +796,10 @@ Describe 'CopyFromTo.ps1' {
             $summary = Get-Content -LiteralPath $summaryPath -Raw | ConvertFrom-Json
 
             $result.ExitCode | Should -Be 0
-            $summary.SchemaVersion | Should -Be 1
+            $summary.SchemaVersion | Should -Be 2
             $summary.MatchedFiles | Should -Be 2
             $summary.TotalBytes | Should -Be $expectedBytes
+            @($summary.RelativePaths) | Sort-Object | Should -Be @('One.txt', 'Two.txt')
             Test-Path -LiteralPath $DestDir | Should -BeFalse
         }
 
@@ -661,8 +815,10 @@ Describe 'CopyFromTo.ps1' {
             $summary = Get-Content -LiteralPath $summaryPath -Raw | ConvertFrom-Json
 
             $result.ExitCode | Should -Be 0
+            $summary.SchemaVersion | Should -Be 2
             $summary.MatchedFiles | Should -Be 0
             $summary.TotalBytes | Should -Be 0
+            @($summary.RelativePaths).Count | Should -Be 0
         }
 
         It 'rejects a preview summary path during a real copy' {
@@ -701,6 +857,8 @@ Describe 'CopyFromTo.ps1' {
             $result.Output | Should -Match '-FileName'
             $result.Output | Should -Match '-VerificationMode'
             $result.Output | Should -Match '-PreviewSummaryPath'
+            $result.Output | Should -Match '-LiteralFile'
+            $result.Output | Should -Match '-FileListPath'
         }
 
         It 'parses and displays help under Windows PowerShell 5.1 when available' -Skip:(-not (Get-Command powershell.exe -ErrorAction SilentlyContinue)) {

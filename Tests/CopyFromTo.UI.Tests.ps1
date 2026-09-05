@@ -21,17 +21,19 @@ Describe 'CopyFromTo desktop UI' {
 
         $LASTEXITCODE | Should -Be 0
         $output | Should -Match 'UI validation passed'
-        $output | Should -Match "Title='CopyFromTo v1\.1 \(Picnic Time\)'"
+        $output | Should -Match "Title='CopyFromTo v1\.2 \(Picnic Time\)'"
         $output | Should -Match 'Themes=Light,Dark'
         $output | Should -Match 'DarkContrast=True'
         $output | Should -Match 'DateFilters=True'
+        $output | Should -Match 'SelectionMode=True'
         $output | Should -Match 'ActivityIndicator=True'
         $output | Should -Match 'PreviewSummary=True'
         $output | Should -Match 'OutputLayout=True'
         $output | Should -Match 'RenderMode=SoftwareOnly'
         $output | Should -Match 'IsolatedHost=True'
         $output | Should -Match 'OutputCapture=True'
-        $output | Should -Match 'Controls=36'
+        $output | Should -Match 'FolderPicker=True'
+        $output | Should -Match 'Controls=44'
     }
 
     It 'shows a green SUCCESS or red FAILED banner after an operation' {
@@ -51,7 +53,30 @@ Describe 'CopyFromTo desktop UI' {
         $uiText | Should -Match 'The destination folder does not exist:'
         $uiText | Should -Match 'Create the folder and start copying\?'
         $uiText | Should -Match "'Create destination folder\?', 'YesNo', 'Warning'"
-        $uiText | Should -Match 'if \(\$confirmation -ne ''Yes''\) \{ return \}'
+        $uiText | Should -Match 'if \(\$confirmation -ne ''Yes''\)'
+        $uiText | Should -Match 'Copy \$countPhrase now\?'
+    }
+
+    It 'supports choosing specific files instead of a name and date filter' {
+        $uiText = Get-Content -LiteralPath $script:UiPath -Raw
+
+        $uiText | Should -Match 'FilterModeRadio'
+        $uiText | Should -Match 'SpecificFilesModeRadio'
+        $uiText | Should -Match 'SpecificFilesListBox'
+        $uiText | Should -Match 'AddFilesButton'
+        $uiText | Should -Match 'OpenFileDialog'
+        $uiText | Should -Match "'-FileListPath'"
+        $uiText | Should -Match 'PinnedRelativePaths'
+        $uiText | Should -Match 'Set-SelectionMode'
+    }
+
+    It 'launches the copy engine with a process-scoped execution-policy bypass' {
+        $uiText = Get-Content -LiteralPath $script:UiPath -Raw
+
+        $uiText | Should -Match "'-ExecutionPolicy', 'Bypass'"
+        $uiText | Should -Match 'CopyFromToUi.FolderPicker'
+        $uiText | Should -Match 'FOS_PICKFOLDERS'
+        $uiText | Should -Match 'FolderBrowserDialog'
     }
 
     It 'uses PowerShell-compatible WPF date values when building arguments' {
@@ -77,7 +102,7 @@ Describe 'CopyFromTo desktop UI' {
     It 'displays the application version in the title bar' {
         $uiText = Get-Content -LiteralPath $script:UiPath -Raw
 
-        $uiText | Should -Match "ApplicationVersion = '1\.1\.0\.0'"
+        $uiText | Should -Match "ApplicationVersion = '1\.2\.1\.0'"
         $uiText | Should -Match "CopyFromTo v\{0\}\.\{1\} \(Picnic Time\)"
         $uiText | Should -Match 'parsedApplicationVersion\.Major'
         $uiText | Should -Match 'parsedApplicationVersion\.Minor'
@@ -92,14 +117,14 @@ Describe 'CopyFromTo desktop UI' {
         $uiText | Should -Match 'PreviewSummarySizeTextBlock'
         $uiText | Should -Match "'-PreviewSummaryPath'"
         $uiText | Should -Match 'Show-PreviewSummary -Path \$previewSummaryPath'
-        $uiText | Should -Match 'SchemaVersion.+-ne 1'
+        $uiText | Should -Match 'schemaVersion -notin @\(1, 2\)'
         $uiText | Should -Match 'Remove-PreviewSummaryFile'
     }
 
     It 'invalidates a preview summary when matching settings change' {
         $uiText = Get-Content -LiteralPath $script:UiPath -Raw
 
-        $uiText | Should -Match '\$SourceTextBox\.Add_TextChanged\(\{ Clear-PreviewSummary \}\)'
+        $uiText | Should -Match '\$SourceTextBox\.Add_TextChanged'
         $uiText | Should -Match '\$FileNameTextBox\.Add_TextChanged\(\{ Clear-PreviewSummary \}\)'
         $uiText | Should -Match '\$StartDatePicker\.Add_SelectedDateChanged\(\{ Clear-PreviewSummary \}\)'
         $uiText | Should -Match '\$RecurseCheckBox\.Add_Checked\(\{ Clear-PreviewSummary \}\)'
