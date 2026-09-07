@@ -396,10 +396,7 @@ if (-not $ValidateOnly -and [Threading.Thread]::CurrentThread.ApartmentState -ne
                 <TextBlock Text="Copy files safely, then verify the result." FontSize="14" Foreground="{DynamicResource MutedTextBrush}" Margin="0,3,0,0" />
             </StackPanel>
             <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
-                <Button x:Name="ThemeToggleButton" Content="Dark Mode" Style="{StaticResource SecondaryButton}" Margin="0,0,10,0" />
-                <Border Background="{DynamicResource BadgeBackgroundBrush}" CornerRadius="12" Padding="12,6">
-                    <TextBlock Text="Desktop UI" Foreground="{DynamicResource BadgeTextBrush}" FontWeight="SemiBold" />
-                </Border>
+                <Button x:Name="ThemeToggleButton" Content="Dark Mode" Style="{StaticResource SecondaryButton}" />
             </StackPanel>
         </Grid>
 
