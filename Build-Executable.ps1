@@ -16,7 +16,7 @@
     Optional .ico file to embed as the application icon.
 
 .PARAMETER Version
-    Four-part Windows file version. Defaults to 1.3.0.0. The executable title bar
+    Four-part Windows file version. Defaults to 1.5.0.0. The executable title bar
     displays its major and minor components.
 
 .PARAMETER InstallDependency
@@ -34,7 +34,7 @@
     .\Build-Executable.ps1 -InstallDependency
 
 .EXAMPLE
-    .\Build-Executable.ps1 -IconPath .\Assets\CopyFromTo.ico -Version 1.3.0.0
+    .\Build-Executable.ps1 -IconPath .\Assets\CopyFromTo.ico -Version 1.5.0.0
 #>
 
 #Requires -Version 5.1
@@ -44,7 +44,7 @@ param(
     [string]$IconPath,
 
     [ValidatePattern('^\d+\.\d+\.\d+\.\d+$')]
-    [string]$Version = '1.3.0.0',
+    [string]$Version = '1.5.0.0',
 
     [switch]$InstallDependency,
 
@@ -105,7 +105,7 @@ $engineBase64 = [Convert]::ToBase64String($engineBytes)
 $engineSha256 = (Get-FileHash -LiteralPath $enginePath -Algorithm SHA256).Hash
 $uiSource = [IO.File]::ReadAllText($uiPath)
 $packagedModeTokenLine = '$script:IsPackagedExecutable = $false'
-$applicationVersionTokenLine = '$script:ApplicationVersion = ''1.3.0.0'''
+$applicationVersionTokenLine = '$script:ApplicationVersion = ''1.5.0.0'''
 $base64TokenLine = '$script:EmbeddedEngineBase64 = ''__COPYFROMTO_ENGINE_BASE64__'''
 $hashTokenLine = '$script:EmbeddedEngineSha256 = ''__COPYFROMTO_ENGINE_SHA256__'''
 if (($uiSource.Split([string[]]@($packagedModeTokenLine), [StringSplitOptions]::None).Count - 1) -ne 1 -or

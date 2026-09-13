@@ -21,7 +21,7 @@ Describe 'CopyFromTo desktop UI' {
 
         $LASTEXITCODE | Should -Be 0
         $output | Should -Match 'UI validation passed'
-        $output | Should -Match "Title='CopyFromTo v1\.3 \(Picnic Time\)'"
+        $output | Should -Match "Title='CopyFromTo v1\.5 \(Picnic Time\)'"
         $output | Should -Match 'Themes=Light,Dark'
         $output | Should -Match 'DarkContrast=True'
         $output | Should -Match 'DateFilters=True'
@@ -102,10 +102,11 @@ Describe 'CopyFromTo desktop UI' {
     It 'displays the application version in the title bar' {
         $uiText = Get-Content -LiteralPath $script:UiPath -Raw
 
-        $uiText | Should -Match "ApplicationVersion = '1\.3\.0\.0'"
+        $uiText | Should -Match "ApplicationVersion = '1\.5\.0\.0'"
         $uiText | Should -Match "CopyFromTo v\{0\}\.\{1\} \(Picnic Time\)"
         $uiText | Should -Match 'parsedApplicationVersion\.Major'
         $uiText | Should -Match 'parsedApplicationVersion\.Minor'
+        $uiText | Should -Match 'Height="860"'
     }
 
     It 'shows an exact, prominent summary after a successful preview' {

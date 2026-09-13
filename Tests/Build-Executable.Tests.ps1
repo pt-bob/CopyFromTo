@@ -21,7 +21,7 @@ Describe 'CopyFromTo executable build support' {
         $buildText = Get-Content -LiteralPath $script:BuildPath -Raw
 
         $buildText | Should -Match "Ps2ExeVersion = '1\.0\.18'"
-        $buildText | Should -Match "Version = '1\.3\.0\.0'"
+        $buildText | Should -Match "Version = '1\.5\.0\.0'"
         $buildText | Should -Match 'applicationVersionTokenLine'
         $buildText | Should -Match 'CopyFromTo v\$displayVersion \(Picnic Time\)'
         $buildText | Should -Match 'ToBase64String\(\$engineBytes\)'

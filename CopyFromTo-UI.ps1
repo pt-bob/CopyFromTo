@@ -33,7 +33,7 @@ $ErrorActionPreference = 'Stop'
 # Build-Executable.ps1 changes this exact assignment to $true only in its
 # temporary compilation source. The checked-in script always remains in source mode.
 $script:IsPackagedExecutable = $false
-$script:ApplicationVersion = '1.3.0.0'
+$script:ApplicationVersion = '1.5.0.0'
 $script:EmbeddedEngineBase64 = '__COPYFROMTO_ENGINE_BASE64__'
 $script:EmbeddedEngineSha256 = '__COPYFROMTO_ENGINE_SHA256__'
 $script:RuntimeEngineFolder = $null
@@ -302,7 +302,7 @@ if (-not $ValidateOnly -and [Threading.Thread]::CurrentThread.ApartmentState -ne
 [xml]$xaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="CopyFromTo" Width="1120" Height="780" MinWidth="940" MinHeight="650"
+        Title="CopyFromTo" Width="1120" Height="860" MinWidth="940" MinHeight="650"
         WindowStartupLocation="CenterScreen" Background="{DynamicResource AppBackgroundBrush}" FontFamily="Segoe UI"
         TextOptions.TextFormattingMode="Display">
     <Window.Resources>

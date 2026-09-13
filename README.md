@@ -157,14 +157,14 @@ Optional metadata and icon:
 
 ```powershell
 .\Build-Executable.ps1 `
-    -Version '1.3.0.0' `
+    -Version '1.5.0.0' `
     -IconPath '.\Assets\CopyFromTo.ico'
 ```
 
-Create a ready-to-distribute `CopyFromTo-1.3.0.0.zip` as well:
+Create a ready-to-distribute `CopyFromTo-1.5.0.0.zip` as well:
 
 ```powershell
-.\Build-Executable.ps1 -Version '1.3.0.0' -CreateZip
+.\Build-Executable.ps1 -Version '1.5.0.0' -CreateZip
 ```
 
 `IconPath` must be a genuine Windows `.ico` file. Build output is ignored by Git under
