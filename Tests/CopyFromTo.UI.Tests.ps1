@@ -21,7 +21,7 @@ Describe 'CopyFromTo desktop UI' {
 
         $LASTEXITCODE | Should -Be 0
         $output | Should -Match 'UI validation passed'
-        $output | Should -Match "Title='CopyFromTo v1\.2 \(Picnic Time\)'"
+        $output | Should -Match "Title='CopyFromTo v1\.5 \(Picnic Time\)'"
         $output | Should -Match 'Themes=Light,Dark'
         $output | Should -Match 'DarkContrast=True'
         $output | Should -Match 'DateFilters=True'
@@ -33,7 +33,7 @@ Describe 'CopyFromTo desktop UI' {
         $output | Should -Match 'IsolatedHost=True'
         $output | Should -Match 'OutputCapture=True'
         $output | Should -Match 'FolderPicker=True'
-        $output | Should -Match 'Controls=44'
+        $output | Should -Match 'Controls=45'
     }
 
     It 'shows a green SUCCESS or red FAILED banner after an operation' {
@@ -102,10 +102,11 @@ Describe 'CopyFromTo desktop UI' {
     It 'displays the application version in the title bar' {
         $uiText = Get-Content -LiteralPath $script:UiPath -Raw
 
-        $uiText | Should -Match "ApplicationVersion = '1\.2\.1\.0'"
+        $uiText | Should -Match "ApplicationVersion = '1\.5\.0\.0'"
         $uiText | Should -Match "CopyFromTo v\{0\}\.\{1\} \(Picnic Time\)"
         $uiText | Should -Match 'parsedApplicationVersion\.Major'
         $uiText | Should -Match 'parsedApplicationVersion\.Minor'
+        $uiText | Should -Match 'Height="860"'
     }
 
     It 'shows an exact, prominent summary after a successful preview' {
@@ -119,6 +120,21 @@ Describe 'CopyFromTo desktop UI' {
         $uiText | Should -Match 'Show-PreviewSummary -Path \$previewSummaryPath'
         $uiText | Should -Match 'schemaVersion -notin @\(1, 2\)'
         $uiText | Should -Match 'Remove-PreviewSummaryFile'
+    }
+
+    It 'requires an exact preview and explicit warning before verified source deletion' {
+        $uiText = Get-Content -LiteralPath $script:UiPath -Raw
+
+        $uiText | Should -Match 'DeleteSourceCheckBox'
+        $uiText | Should -Match 'Delete source files after verified copy'
+        $uiText | Should -Match 'Preview required before deletion'
+        $uiText | Should -Match 'Confirm verified source deletion'
+        $uiText | Should -Match "'-DeleteSourceAfterVerification'"
+        $uiText | Should -Match "'-SourceDeletionConfirmed'"
+        $uiText | Should -Match 'SHA-256 compare every source/destination pair'
+        $uiText | Should -Match '\$DeleteSourceCheckBox\.IsChecked'
+        $uiText | Should -Match 'ActiveOperationDeletesSource'
+        $uiText | Should -Match '\$DeleteSourceCheckBox\.IsChecked = \$false'
     }
 
     It 'invalidates a preview summary when matching settings change' {

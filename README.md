@@ -21,6 +21,7 @@ The desktop interface provides:
 - optional start and end dates;
 - recursive copying and explicit junction/symbolic-link following;
 - fast metadata or thorough SHA-256 verification;
+- optional deletion of only the exact copied source files after full verification;
 - advanced Robocopy retry, wait, thread, timestamp, and preview settings;
 - a safe preview that makes no destination changes;
 - a prominent preview summary with the exact matched file count and total size;
@@ -34,6 +35,12 @@ The UI asks for confirmation before a real copy. It then starts `CopyFromTo.ps1`
 separate non-interactive PowerShell process, so the window stays responsive and the
 existing CLI engine remains the single source of truth for filtering, copying, logging,
 exit codes, and verification.
+
+Source deletion is disabled by default. When selected, the UI requires a successful,
+still-current Preview and displays a separate destructive-action warning with the exact
+file count, total size, source, and destination. The engine performs a fresh SHA-256
+comparison of every source/destination pair before deleting anything. It removes only
+the pinned files from that operation and never removes source folders.
 
 The UI requires Windows PowerShell 5.1 or PowerShell 7 on Windows with WPF. If it is
 started from a terminal, it launches the WPF window in a separate hidden STA PowerShell
@@ -66,6 +73,12 @@ The command-line script remains fully supported and unchanged in how it is invok
 .\CopyFromTo.ps1 -Source 'C:\Data' -Destination 'D:\Backup' `
     -LiteralFile 'Report.pdf,2024\Invoice.xlsx' -Force
 
+# Unattended copy followed by guarded deletion of only the verified source files.
+# Both switches are required so deletion cannot be enabled accidentally by -Force.
+.\CopyFromTo.ps1 -Source 'C:\Data' -Destination 'D:\Archive' `
+    -FileName '*.processed' -Force -DeleteSourceAfterVerification `
+    -SourceDeletionConfirmed
+
 # Full parameter help
 .\CopyFromTo.ps1 -Help
 ```
@@ -78,6 +91,9 @@ The command-line script remains fully supported and unchanged in how it is invok
   through junctions or symbolic links.
 - Reparse points are skipped by default, with cycle detection when following is enabled.
 - Copies are verified by size and timestamp, with optional SHA-256 verification.
+- Optional source cleanup uses the original exact transfer set, requires complete
+  verification, performs an all-files SHA-256 preflight, rejects reparse-point files,
+  repeats decisive checks immediately before each deletion, and never removes folders.
 - Script-level and Robocopy logs are written separately under `Logs` by default.
 
 ## Tests
@@ -141,14 +157,14 @@ Optional metadata and icon:
 
 ```powershell
 .\Build-Executable.ps1 `
-    -Version '1.2.0.0' `
+    -Version '1.5.0.0' `
     -IconPath '.\Assets\CopyFromTo.ico'
 ```
 
-Create a ready-to-distribute `CopyFromTo-1.2.0.0.zip` as well:
+Create a ready-to-distribute `CopyFromTo-1.5.0.0.zip` as well:
 
 ```powershell
-.\Build-Executable.ps1 -Version '1.2.0.0' -CreateZip
+.\Build-Executable.ps1 -Version '1.5.0.0' -CreateZip
 ```
 
 `IconPath` must be a genuine Windows `.ico` file. Build output is ignored by Git under

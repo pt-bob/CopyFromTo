@@ -33,7 +33,7 @@ $ErrorActionPreference = 'Stop'
 # Build-Executable.ps1 changes this exact assignment to $true only in its
 # temporary compilation source. The checked-in script always remains in source mode.
 $script:IsPackagedExecutable = $false
-$script:ApplicationVersion = '1.2.1.0'
+$script:ApplicationVersion = '1.5.0.0'
 $script:EmbeddedEngineBase64 = '__COPYFROMTO_ENGINE_BASE64__'
 $script:EmbeddedEngineSha256 = '__COPYFROMTO_ENGINE_SHA256__'
 $script:RuntimeEngineFolder = $null
@@ -302,7 +302,7 @@ if (-not $ValidateOnly -and [Threading.Thread]::CurrentThread.ApartmentState -ne
 [xml]$xaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="CopyFromTo" Width="1120" Height="780" MinWidth="940" MinHeight="650"
+        Title="CopyFromTo" Width="1120" Height="860" MinWidth="940" MinHeight="650"
         WindowStartupLocation="CenterScreen" Background="{DynamicResource AppBackgroundBrush}" FontFamily="Segoe UI"
         TextOptions.TextFormattingMode="Display">
     <Window.Resources>
@@ -476,6 +476,19 @@ if (-not $ValidateOnly -and [Threading.Thread]::CurrentThread.ApartmentState -ne
                             <ComboBoxItem Content="SHA-256 hash (thorough)" Tag="Hash" />
                         </ComboBox>
 
+                        <Border Margin="0,14,0,0" Padding="11,9" CornerRadius="6"
+                                BorderBrush="#D97706" BorderThickness="1"
+                                Background="{DynamicResource InputBackgroundBrush}">
+                            <StackPanel>
+                                <CheckBox x:Name="DeleteSourceCheckBox"
+                                          Content="Delete source files after verified copy"
+                                          FontWeight="SemiBold" />
+                                <TextBlock Text="Optional and destructive. A current Preview and a separate confirmation are required. Only the exact copied files are eligible; folders are never removed."
+                                           FontSize="11" Foreground="{DynamicResource MutedTextBrush}"
+                                           TextWrapping="Wrap" Margin="21,5,0,0" />
+                            </StackPanel>
+                        </Border>
+
                         <Expander x:Name="AdvancedExpander" Header="Advanced settings" Margin="0,16,0,0" Foreground="{DynamicResource TextBrush}">
                             <StackPanel Margin="0,8,0,0">
                                 <Grid>
@@ -599,7 +612,7 @@ catch {
 $requiredControls = @(
     'SourceFolderLabel', 'SourceTextBox', 'DestinationTextBox', 'FileNameTextBox', 'UseStartDateCheckBox',
     'UseEndDateCheckBox', 'StartDatePicker', 'EndDatePicker', 'RecurseCheckBox',
-    'FollowLinksCheckBox', 'VerificationComboBox', 'RetryCountTextBox',
+    'FollowLinksCheckBox', 'VerificationComboBox', 'DeleteSourceCheckBox', 'RetryCountTextBox',
     'RetryWaitTextBox', 'ThreadsTextBox', 'ToleranceTextBox', 'PreviewLimitTextBox',
     'LogFolderTextBox', 'BrowseSourceButton', 'BrowseDestinationButton', 'BrowseLogButton',
     'ThemeToggleButton',
@@ -629,6 +642,7 @@ $script:OperationElapsed = $null
 $script:OutputCollector = $null
 $script:PreviewSummaryPath = $null
 $script:ActiveOperationIsPreview = $false
+$script:ActiveOperationDeletesSource = $false
 $script:FileListPath = $null
 $script:SpecificFilePaths = [System.Collections.Generic.List[string]]::new()
 $script:PinnedRelativePaths = $null
@@ -740,6 +754,9 @@ if ($ValidateOnly) {
         $SpecificFilesListBox.Items.Count -ne 0 -or
         -not [string]::IsNullOrWhiteSpace($FileNameTextBox.Text)) {
         throw 'Selection-mode initial-state validation failed.'
+    }
+    if ($DeleteSourceCheckBox.IsChecked) {
+        throw 'Source-deletion option must be disabled by default.'
     }
 
     $OutputTextBox.Text = 'output-visibility-probe'
@@ -950,6 +967,7 @@ function Set-UiRunningState {
     param([bool]$Running)
     $PreviewButton.IsEnabled = -not $Running
     $CopyButton.IsEnabled = -not $Running
+    $DeleteSourceCheckBox.IsEnabled = -not $Running
     $CancelButton.IsEnabled = $Running
     $CancelButton.Content = if ($Running) { 'Cancel operation' } else { 'Cancel' }
     $ActivityProgressBar.Visibility = if ($Running) { 'Visible' } else { 'Collapsed' }
@@ -975,6 +993,7 @@ function Complete-CopyOperation {
 
     $wasCancelled = $script:CancelRequested
     $wasPreview = $script:ActiveOperationIsPreview
+    $wasSourceDeletion = $script:ActiveOperationDeletesSource
     $previewSummaryPath = $script:PreviewSummaryPath
     Remove-ProcessOutputCollector
     $script:ActiveProcess.Dispose()
@@ -983,6 +1002,7 @@ function Complete-CopyOperation {
     $script:PendingExitCode = $null
     $script:OperationElapsed = $null
     $script:ActiveOperationIsPreview = $false
+    $script:ActiveOperationDeletesSource = $false
     Set-UiRunningState $false
 
     if ($wasCancelled) {
@@ -1008,6 +1028,9 @@ function Complete-CopyOperation {
         $successDetail = if ($wasPreview) {
             "Preview completed successfully in $Elapsed."
         }
+        elseif ($wasSourceDeletion) {
+            "Copy, verification, and exact source cleanup completed successfully in $Elapsed."
+        }
         else {
             "Operation completed successfully in $Elapsed."
         }
@@ -1031,6 +1054,12 @@ function Complete-CopyOperation {
             "CopyFromTo exited with status $ExitCode after $Elapsed."
         }
         Set-OperationResult -Result Failed -Detail $failedDetail
+    }
+    if ($wasSourceDeletion) {
+        # A destructive run necessarily makes its preview stale, even if cleanup was
+        # cancelled or stopped partway through. Require a fresh preview before reuse.
+        Clear-PreviewSummary
+        $DeleteSourceCheckBox.IsChecked = $false
     }
     Remove-PreviewSummaryFile
     Remove-FileListFile
@@ -1283,9 +1312,14 @@ function Get-OperationArguments {
     ))
 
     $fileListLines = $null
-    $usePinnedFilterList = -not $Preview -and -not $specificMode -and
-        $null -ne $script:PinnedRelativePaths
-    if ($specificMode) {
+    $usePinnedFilterList = -not $Preview -and $null -ne $script:PinnedRelativePaths
+    if ($usePinnedFilterList) {
+        # A completed preview is the safest source of truth for a real operation in
+        # either selection mode. In particular, source deletion must use this exact
+        # pinned list rather than rebuilding a wildcard match later.
+        $fileListLines = @($script:PinnedRelativePaths)
+    }
+    elseif ($specificMode) {
         if ($script:SpecificFilePaths.Count -eq 0) {
             throw 'Add at least one file to copy, or switch back to Filter by name and date.'
         }
@@ -1300,9 +1334,6 @@ function Get-OperationArguments {
             $validLines.Add($filePath)
         }
         $fileListLines = $validLines.ToArray()
-    }
-    elseif ($usePinnedFilterList) {
-        $fileListLines = @($script:PinnedRelativePaths)
     }
     else {
         $patterns = $FileNameTextBox.Text.Trim()
@@ -1335,6 +1366,7 @@ function Get-OperationArguments {
         Source       = $source
         Destination  = $destination
         SpecificMode = $specificMode
+        DeleteSource = [bool]$DeleteSourceCheckBox.IsChecked
     }
 }
 
@@ -1406,6 +1438,18 @@ function Start-CopyOperation {
             return
         }
 
+        if ($operation.DeleteSource -and
+            ($null -eq $script:PinnedRelativePaths -or $null -eq $script:PinnedMatchedCount)) {
+            [Windows.MessageBox]::Show(
+                'Run Preview with the current settings before using source deletion. The completed Preview creates the exact, pinned file list that the safety checks require.',
+                'Preview required before deletion', 'OK', 'Warning'
+            ) | Out-Null
+            if ($fileListPath -and (Test-Path -LiteralPath $fileListPath -PathType Leaf)) {
+                Remove-Item -LiteralPath $fileListPath -Force -ErrorAction SilentlyContinue
+            }
+            return
+        }
+
         $countPhrase = if ($null -eq $fileCount) {
             'matching files'
         }
@@ -1436,6 +1480,23 @@ function Start-CopyOperation {
             }
             return
         }
+
+        if ($operation.DeleteSource) {
+            $deleteConfirmation = [Windows.MessageBox]::Show(
+                "WARNING: This operation will permanently delete the source files after the entire copy set verifies successfully.`n`nExact scope: $countPhrase`nSource:      $source`nDestination: $destination`n`nBefore deletion, CopyFromTo will SHA-256 compare every source/destination pair and abort all deletion if any safety check fails. It will never delete folders or files outside this completed Preview.`n`nProceed with copy, verification, and source deletion?",
+                'Confirm verified source deletion', 'YesNo', 'Warning'
+            )
+            if ($deleteConfirmation -ne 'Yes') {
+                if ($fileListPath -and (Test-Path -LiteralPath $fileListPath -PathType Leaf)) {
+                    Remove-Item -LiteralPath $fileListPath -Force -ErrorAction SilentlyContinue
+                }
+                return
+            }
+            $arguments = [Collections.Generic.List[string]]::new([string[]]$arguments)
+            $arguments.Add('-DeleteSourceAfterVerification')
+            $arguments.Add('-SourceDeletionConfirmed')
+            $arguments = $arguments.ToArray()
+        }
     }
 
     $OutputTextBox.Clear()
@@ -1462,6 +1523,7 @@ function Start-CopyOperation {
         $script:PreviewSummaryPath = $previewSummaryPath
         $script:FileListPath = $fileListPath
         $script:ActiveOperationIsPreview = [bool]$Preview
+        $script:ActiveOperationDeletesSource = [bool](-not $Preview -and $operation.DeleteSource)
         $script:CancelRequested = $false
         $script:PendingExitCode = $null
         $script:OperationElapsed = $null
@@ -1470,7 +1532,15 @@ function Start-CopyOperation {
         $process.BeginErrorReadLine()
         Set-UiRunningState $true
         $ElapsedTextBlock.Text = 'Elapsed 00:00:00'
-        $StatusTextBlock.Text = if ($Preview) { 'Building preview…' } else { 'Copy in progress…' }
+        $StatusTextBlock.Text = if ($Preview) {
+            'Building preview…'
+        }
+        elseif ($operation.DeleteSource) {
+            'Copying, verifying, then deleting exact source files…'
+        }
+        else {
+            'Copy in progress…'
+        }
     }
     catch {
         $collector.Dispose()
@@ -1484,6 +1554,7 @@ function Start-CopyOperation {
         $script:PreviewSummaryPath = $null
         $script:FileListPath = $null
         $script:ActiveOperationIsPreview = $false
+        $script:ActiveOperationDeletesSource = $false
         Set-OperationResult -Result Failed -Detail 'The copy process could not be started.'
         [Windows.MessageBox]::Show("Could not start CopyFromTo.ps1. $($_.Exception.Message)", 'Launch failed', 'OK', 'Error') | Out-Null
     }

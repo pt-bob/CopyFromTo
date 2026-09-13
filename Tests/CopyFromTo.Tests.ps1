@@ -756,6 +756,70 @@ Describe 'CopyFromTo.ps1' {
             $result.Output | Should -Match 'VerificationMode.*Hash'
         }
 
+        It 'deletes only the exact verified source files when explicitly confirmed' {
+            New-TestFile "$SourceDir\MoveMe.txt" -Content 'verified payload' -LastWriteTime '2024-05-01'
+            New-TestFile "$SourceDir\KeepMe.csv" -Content 'must remain' -LastWriteTime '2024-05-01'
+
+            $result = Invoke-CopyFromTo -ScriptArgs @(
+                '-Source', $SourceDir, '-Destination', $DestDir,
+                '-FileName', '*.txt', '-Force',
+                '-DeleteSourceAfterVerification', '-SourceDeletionConfirmed',
+                '-PassThru', '-LogFolder', $LogDir
+            )
+
+            $result.ExitCode | Should -Be 0
+            Test-Path -LiteralPath "$SourceDir\MoveMe.txt" | Should -BeFalse
+            Test-Path -LiteralPath "$SourceDir\KeepMe.csv" | Should -BeTrue
+            (Get-Content -LiteralPath "$DestDir\MoveMe.txt" -Raw) | Should -Be 'verified payload'
+            $result.Output | Should -Match 'Source cleanup passed: deleted exactly 1 verified source file'
+            $result.Output | Should -Match 'SourceDeleted.*MoveMe.txt'
+        }
+
+        It 'refuses unattended source deletion without a separate confirmation switch' {
+            New-TestFile "$SourceDir\Protected.txt" -Content 'keep source' -LastWriteTime '2024-05-01'
+
+            $result = Invoke-CopyFromTo -ScriptArgs @(
+                '-Source', $SourceDir, '-Destination', $DestDir,
+                '-FileName', '*.txt', '-Force', '-DeleteSourceAfterVerification',
+                '-LogFolder', $LogDir
+            )
+
+            $result.ExitCode | Should -Be 2
+            $result.Output | Should -Match 'requires SourceDeletionConfirmed when Force is used'
+            Test-Path -LiteralPath "$SourceDir\Protected.txt" | Should -BeTrue
+            Test-Path -LiteralPath $DestDir | Should -BeFalse
+        }
+
+        It 'rejects a source-deletion confirmation without the deletion request' {
+            New-TestFile "$SourceDir\Protected.txt" -Content 'keep source' -LastWriteTime '2024-05-01'
+
+            $result = Invoke-CopyFromTo -ScriptArgs @(
+                '-Source', $SourceDir, '-Destination', $DestDir,
+                '-FileName', '*.txt', '-Force', '-SourceDeletionConfirmed',
+                '-LogFolder', $LogDir
+            )
+
+            $result.ExitCode | Should -Be 2
+            $result.Output | Should -Match 'can only be used with DeleteSourceAfterVerification'
+            Test-Path -LiteralPath "$SourceDir\Protected.txt" | Should -BeTrue
+            Test-Path -LiteralPath $DestDir | Should -BeFalse
+        }
+
+        It 'never deletes source files during a preview' {
+            New-TestFile "$SourceDir\PreviewOnly.txt" -Content 'still here' -LastWriteTime '2024-05-01'
+
+            $result = Invoke-CopyFromTo -ScriptArgs @(
+                '-Source', $SourceDir, '-Destination', $DestDir,
+                '-FileName', '*.txt', '-Force', '-DryRun',
+                '-DeleteSourceAfterVerification', '-LogFolder', $LogDir
+            )
+
+            $result.ExitCode | Should -Be 0
+            Test-Path -LiteralPath "$SourceDir\PreviewOnly.txt" | Should -BeTrue
+            Test-Path -LiteralPath $DestDir | Should -BeFalse
+            $result.Output | Should -Match 'previews never delete source files'
+        }
+
         It 'honors configurable retry, wait, and thread settings' {
             New-TestFile "$SourceDir\File1.txt" -LastWriteTime '2024-05-01'
             $result = Invoke-CopyFromTo -ScriptArgs @(
@@ -857,6 +921,8 @@ Describe 'CopyFromTo.ps1' {
             $result.Output | Should -Match '-FileName'
             $result.Output | Should -Match '-VerificationMode'
             $result.Output | Should -Match '-PreviewSummaryPath'
+            $result.Output | Should -Match '-DeleteSourceAfterVerification'
+            $result.Output | Should -Match '-SourceDeletionConfirmed'
             $result.Output | Should -Match '-LiteralFile'
             $result.Output | Should -Match '-FileListPath'
         }
