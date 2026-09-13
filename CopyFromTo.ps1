@@ -23,6 +23,11 @@
     source directory (and in command-line-sized batches) with exact file names, so it
     cannot copy additional files merely because they match a broad wildcard.
 
+    -DeleteSourceAfterVerification optionally turns a successful copy into a guarded
+    move-like operation. Source files are considered for deletion only after the entire
+    transfer set verifies successfully and a fresh SHA-256 comparison confirms every
+    source/destination pair. Deletion never removes folders or re-enumerates wildcards.
+
 .PARAMETER Source
     Folder to copy files from. Can be a local path or a UNC network path.
 
@@ -109,6 +114,19 @@
     Optional path where a dry run writes a small JSON summary containing the exact
     matched file count, total bytes, and source-relative paths. Intended for trusted
     UI or automation callers. The normal console output and copy behavior are unchanged.
+
+.PARAMETER DeleteSourceAfterVerification
+    After every copied file has passed normal verification, perform an additional
+    SHA-256 safety check and delete only the exact source files from this operation.
+    No folders are removed. Interactive use requires a separate destructive-action
+    confirmation after verification. With -Force, SourceDeletionConfirmed is also
+    required.
+
+.PARAMETER SourceDeletionConfirmed
+    Confirms that an unattended caller has already obtained explicit approval to delete
+    the verified source files. Valid only with -DeleteSourceAfterVerification. This
+    switch does not bypass verification, path-containment checks, reparse-point checks,
+    or the fresh SHA-256 comparison.
 
 .PARAMETER PassThru
     Emit a structured result object after a completed copy. By default, results are
@@ -221,6 +239,12 @@ param(
 
     [Parameter(ParameterSetName = 'Default')]
     [string]$PreviewSummaryPath,
+
+    [Parameter(ParameterSetName = 'Default')]
+    [switch]$DeleteSourceAfterVerification,
+
+    [Parameter(ParameterSetName = 'Default')]
+    [switch]$SourceDeletionConfirmed,
 
     [Parameter(ParameterSetName = 'Default')]
     [switch]$PassThru,
@@ -724,6 +748,8 @@ $verified = 0
 $missing = [System.Collections.Generic.List[string]]::new()
 $mismatched = [System.Collections.Generic.List[string]]::new()
 $sourceMissing = [System.Collections.Generic.List[string]]::new()
+$deletedSourceFiles = [System.Collections.Generic.List[string]]::new()
+$sourceDeletionIssues = [System.Collections.Generic.List[string]]::new()
 $aggregateRobocopyExit = 0
 $robocopyInvocationCount = 0
 
@@ -753,13 +779,20 @@ try {
     if ($PreviewSummaryPath -and -not $previewOnly) {
         throw 'PreviewSummaryPath can only be used with -DryRun or -WhatIf.'
     }
+    if ($SourceDeletionConfirmed -and -not $DeleteSourceAfterVerification) {
+        throw 'SourceDeletionConfirmed can only be used with DeleteSourceAfterVerification.'
+    }
+    if ($DeleteSourceAfterVerification -and -not $previewOnly -and $Force -and
+        -not $SourceDeletionConfirmed) {
+        throw 'DeleteSourceAfterVerification requires SourceDeletionConfirmed when Force is used. Source files were not copied or deleted.'
+    }
     Initialize-Logging -Folder $logDir -RetentionDays $(if ($previewOnly) { 0 } else { $LogRetentionDays })
 
     if (-not (Get-Command robocopy.exe -ErrorAction SilentlyContinue)) {
         throw "robocopy.exe was not found. It ships with Windows; check your PATH."
     }
 
-    Write-Log "CopyFromTo starting. Source='$Source' Destination='$Destination' DryRun=$($DryRun.IsPresent) WhatIf=$WhatIfPreference Recurse=$($Recurse.IsPresent) Force=$($Force.IsPresent) VerificationMode=$VerificationMode"
+    Write-Log "CopyFromTo starting. Source='$Source' Destination='$Destination' DryRun=$($DryRun.IsPresent) WhatIf=$WhatIfPreference Recurse=$($Recurse.IsPresent) Force=$($Force.IsPresent) VerificationMode=$VerificationMode DeleteSourceAfterVerification=$($DeleteSourceAfterVerification.IsPresent)"
 
     if (Test-Path -LiteralPath $Destination -PathType Leaf) {
         throw "Destination '$Destination' exists and is a file, not a directory."
@@ -946,6 +979,9 @@ try {
     if ($previewOnly) {
         $mode = if ($WhatIfPreference) { 'WHATIF' } else { 'DRY RUN' }
         Write-Log "$mode`: no files were copied and no destination changes were made." 'WARN'
+        if ($DeleteSourceAfterVerification) {
+            Write-Log "$mode`: source deletion was requested, but previews never delete source files." 'WARN'
+        }
         exit 0
     }
 
@@ -1094,6 +1130,137 @@ try {
         if ($exitStatus -eq 0) { $exitStatus = 1 }
     }
 
+    # --- Optional guarded source cleanup ---
+    # This deliberately uses the original exact transfer set. It never re-runs a
+    # wildcard/date search, never removes directories, and refuses to begin if any
+    # candidate fails the all-files preflight.
+    if ($DeleteSourceAfterVerification) {
+        if ($exitStatus -ne 0 -or $verified -ne $matchedFiles.Count) {
+            $sourceDeletionIssues.Add('Copy or verification did not complete successfully.')
+            Write-Log 'Source deletion skipped because the complete transfer set did not verify successfully.' 'ERROR'
+        }
+        else {
+            if (-not $SourceDeletionConfirmed) {
+                Write-Host ''
+                Write-Host 'DESTRUCTIVE ACTION: delete the verified source files?' -ForegroundColor Red
+                Write-Host "Only the $($matchedFiles.Count) exact file(s) listed above will be deleted. Folders and all other source files will remain." -ForegroundColor Yellow
+                Write-Host "Type DELETE to remove them from '$Source': " -ForegroundColor Red -NoNewline
+                $deleteAnswer = Read-Host
+                if ($deleteAnswer -cne 'DELETE') {
+                    Write-Log 'Source deletion cancelled; copied destination files were retained.' 'WARN'
+                    $exitStatus = 3
+                }
+            }
+            else {
+                Write-Log 'Explicit source-deletion confirmation was supplied by the caller.' 'WARN'
+            }
+
+            if ($exitStatus -eq 0 -and
+                $PSCmdlet.ShouldProcess($Source, "Delete $($matchedFiles.Count) source file(s) after full verification")) {
+                Write-Log 'Running all-files source-deletion preflight with SHA-256 verification...' 'WARN'
+                $deletionPlan = [System.Collections.Generic.List[object]]::new()
+
+                foreach ($f in $matchedFiles) {
+                    try {
+                        $relativePath = Get-RelativeFilePath -BasePath $Source -FullPath $f.FullName
+                        $sourcePath = Resolve-FullFileSystemPath -Path $f.FullName -MustExist
+                        $destinationPath = Resolve-FullFileSystemPath -Path (Join-Path $Destination $relativePath) -MustExist
+                        $currentSource = Get-Item -LiteralPath $sourcePath -Force -ErrorAction Stop
+                        $currentDestination = Get-Item -LiteralPath $destinationPath -Force -ErrorAction Stop
+
+                        if ($currentSource.PSIsContainer -or $currentDestination.PSIsContainer) {
+                            throw 'A cleanup candidate is not a regular file.'
+                        }
+                        if (($currentSource.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+                            ($currentDestination.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                            throw 'Reparse-point files are not eligible for automatic source deletion.'
+                        }
+
+                        $physicalSource = Resolve-ExistingPhysicalPath -Path $sourcePath
+                        $physicalDestination = Resolve-ExistingPhysicalPath -Path $destinationPath
+                        if (-not (Test-PathIsWithin -Parent $Source -Child $physicalSource)) {
+                            throw "Source candidate resolves outside the source folder: '$physicalSource'."
+                        }
+                        if (-not (Test-PathIsWithin -Parent $Destination -Child $physicalDestination)) {
+                            throw "Destination candidate resolves outside the destination folder: '$physicalDestination'."
+                        }
+                        if ($currentSource.Length -ne $f.Length -or
+                            $currentSource.LastWriteTimeUtc -ne $f.LastWriteTimeUtc) {
+                            throw 'The source file changed after the transfer set was selected.'
+                        }
+                        if ($currentDestination.Length -ne $currentSource.Length) {
+                            throw 'Source and destination sizes differ.'
+                        }
+
+                        $sourceHash = (Get-FileHash -LiteralPath $sourcePath -Algorithm SHA256 -ErrorAction Stop).Hash
+                        $destinationHash = (Get-FileHash -LiteralPath $destinationPath -Algorithm SHA256 -ErrorAction Stop).Hash
+                        if ($sourceHash -ne $destinationHash) {
+                            throw 'Source and destination SHA-256 hashes differ.'
+                        }
+
+                        $deletionPlan.Add([pscustomobject]@{
+                            RelativePath            = $relativePath
+                            SourcePath              = $sourcePath
+                            DestinationPath         = $destinationPath
+                            Length                  = [long]$currentSource.Length
+                            SourceLastWriteTimeUtc  = $currentSource.LastWriteTimeUtc
+                            Sha256                  = $sourceHash
+                        })
+                    }
+                    catch {
+                        $issue = "$($f.FullName): $($_.Exception.Message)"
+                        $sourceDeletionIssues.Add($issue)
+                        Write-Log "  SOURCE DELETION BLOCKED: $issue" 'ERROR'
+                    }
+                }
+
+                if ($sourceDeletionIssues.Count -gt 0 -or $deletionPlan.Count -ne $matchedFiles.Count) {
+                    Write-Log "Source deletion aborted before removing any files: $($sourceDeletionIssues.Count) safety issue(s) found." 'ERROR'
+                    $exitStatus = 1
+                }
+                else {
+                    Write-Log "Source-deletion preflight passed for all $($deletionPlan.Count) file(s). Beginning exact-file deletion." 'SUCCESS'
+                    foreach ($entry in $deletionPlan) {
+                        try {
+                            # Repeat the decisive checks immediately before each delete to
+                            # narrow the window in which either file could be replaced.
+                            $sourceNow = Get-Item -LiteralPath $entry.SourcePath -Force -ErrorAction Stop
+                            $destinationNow = Get-Item -LiteralPath $entry.DestinationPath -Force -ErrorAction Stop
+                            if ($sourceNow.Length -ne $entry.Length -or
+                                $sourceNow.LastWriteTimeUtc -ne $entry.SourceLastWriteTimeUtc -or
+                                $destinationNow.Length -ne $entry.Length) {
+                                throw 'Source or destination metadata changed after deletion preflight.'
+                            }
+                            $sourceHashNow = (Get-FileHash -LiteralPath $entry.SourcePath -Algorithm SHA256 -ErrorAction Stop).Hash
+                            $destinationHashNow = (Get-FileHash -LiteralPath $entry.DestinationPath -Algorithm SHA256 -ErrorAction Stop).Hash
+                            if ($sourceHashNow -ne $entry.Sha256 -or $destinationHashNow -ne $entry.Sha256) {
+                                throw 'Source or destination content changed after deletion preflight.'
+                            }
+
+                            Remove-Item -LiteralPath $entry.SourcePath -ErrorAction Stop
+                            $deletedSourceFiles.Add($entry.RelativePath)
+                            Write-Log "  DELETED SOURCE: $($entry.RelativePath)" 'WARN'
+                        }
+                        catch {
+                            $issue = "$($entry.RelativePath): $($_.Exception.Message)"
+                            $sourceDeletionIssues.Add($issue)
+                            Write-Log "Source deletion stopped after deleting $($deletedSourceFiles.Count) file(s): $issue" 'ERROR'
+                            $exitStatus = 2
+                            break
+                        }
+                    }
+                    if ($deletedSourceFiles.Count -eq $matchedFiles.Count) {
+                        Write-Log "Source cleanup passed: deleted exactly $($deletedSourceFiles.Count) verified source file(s); no folders were removed." 'SUCCESS'
+                    }
+                }
+            }
+            elseif ($exitStatus -eq 0) {
+                Write-Log 'Source deletion cancelled by ShouldProcess; copied destination files were retained.' 'WARN'
+                $exitStatus = 3
+            }
+        }
+    }
+
     $elapsed = (Get-Date) - $script:StartTime
     $summaryFields = [ordered]@{
         'Matched'       = $matchedFiles.Count
@@ -1101,6 +1268,8 @@ try {
         'Source gone'   = $sourceMissing.Count
         'Missing'       = $missing.Count
         'Mismatched'    = $mismatched.Count
+        'Source deleted'= $deletedSourceFiles.Count
+        'Delete issues' = $sourceDeletionIssues.Count
         'Robocopy runs' = $robocopyInvocationCount
         'Elapsed'       = $elapsed.ToString('hh\:mm\:ss')
         'Script log'    = $script:LogFile
@@ -1119,6 +1288,8 @@ try {
         SourceMissing   = $sourceMissing.ToArray()
         Missing         = $missing.ToArray()
         Mismatched      = $mismatched.ToArray()
+        SourceDeleted   = $deletedSourceFiles.ToArray()
+        SourceDeletionIssues = $sourceDeletionIssues.ToArray()
         RobocopyExit    = $aggregateRobocopyExit
         RobocopyRuns    = $robocopyInvocationCount
         VerificationMode = $VerificationMode

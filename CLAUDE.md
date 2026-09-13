@@ -86,6 +86,13 @@ file:
    the destination has the same name, size, and last-write time (within a 2-second
    tolerance for filesystem timestamp resolution differences). `-VerificationMode Hash`
    additionally compares SHA-256 hashes; metadata mode remains the faster default.
+4. **Optional source cleanup (PowerShell).** `-DeleteSourceAfterVerification` operates
+   only on the original exact transfer set and only after every file verifies. Before
+   removing anything, it runs an all-files SHA-256 preflight, rechecks containment and
+   rejects reparse-point files. It repeats the decisive metadata/hash checks immediately
+   before each literal file deletion. It never removes directories. Under `-Force`, the
+   independent `-SourceDeletionConfirmed` acknowledgement is mandatory; the UI supplies
+   it only after a current preview and a separate destructive-action warning.
 
 ### Key design decisions worth knowing before changing this script
 
